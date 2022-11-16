@@ -1,16 +1,16 @@
+use chrono::NaiveDateTime;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use serde::Serialize;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::BufRead;
 use std::io::{BufReader, BufWriter};
-use chrono::{NaiveDateTime};
-use serde::Serialize;
-use std::collections::HashMap;
 
 #[macro_use]
 extern crate serde_derive;
 use rmp_serde::Serializer;
-// use serde::{Deserialize, Serialize};
-// // use rmps::{Deserializer, Serializer};
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 struct PixelPlacement {
@@ -20,6 +20,7 @@ struct PixelPlacement {
     color_index: u8,
 }
 
+// This isn't very efficient but only needs to run once :)
 fn main() {
     let args: Vec<_> = env::args().collect();
 
@@ -29,7 +30,8 @@ fn main() {
     let file = fs::File::open(filename).expect("Could not open file");
     let out = fs::File::create(out_filename).expect("Could not create file");
     let out_buffered = BufWriter::new(out);
-    let mut out_serializer = Serializer::new(out_buffered);
+    let out_compressed_writer = ZlibEncoder::new(out_buffered, Compression::default());
+    let mut out_serializer = Serializer::new(out_compressed_writer);
 
     let reader = BufReader::new(file);
 
@@ -39,9 +41,11 @@ fn main() {
 
     for line in reader.lines().skip(1) {
         let line = line.unwrap();
-        let columns = line.split(",").collect::<Vec<_>>();
+        let columns = line.split(',').collect::<Vec<_>>();
 
-        let timestamp = NaiveDateTime::parse_from_str(columns.get(0).unwrap(), "%Y-%m-%d %H:%M:%S%.3f UTC").expect("Could not parse timestamp");
+        let timestamp =
+            NaiveDateTime::parse_from_str(columns.first().unwrap(), "%Y-%m-%d %H:%M:%S%.3f UTC")
+                .expect("Could not parse timestamp");
 
         first_timestamp = match first_timestamp {
             Some(first_timestamp) => Some(first_timestamp),
@@ -61,8 +65,10 @@ fn main() {
         let pixel = PixelPlacement {
             x,
             y,
-            seconds_since_epoch: timestamp.signed_duration_since(first_timestamp.unwrap()).num_seconds() as u32,
-            color_index: color_map.get(&color_str).unwrap().clone() as u8,
+            seconds_since_epoch: timestamp
+                .signed_duration_since(first_timestamp.unwrap())
+                .num_seconds() as u32,
+            color_index: *color_map.get(&color_str).unwrap() as u8,
         };
 
         pixel.serialize(&mut out_serializer).unwrap();
