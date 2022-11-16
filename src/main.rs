@@ -1,9 +1,24 @@
 use std::env;
 use std::fs;
 use std::io::BufRead;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use chrono::{NaiveDateTime};
+use serde::Serialize;
 use std::collections::HashMap;
+
+#[macro_use]
+extern crate serde_derive;
+use rmp_serde::Serializer;
+// use serde::{Deserialize, Serialize};
+// // use rmps::{Deserializer, Serializer};
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+struct PixelPlacement {
+    x: u16,
+    y: u16,
+    seconds_since_epoch: u32,
+    color_index: u8,
+}
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -13,6 +28,8 @@ fn main() {
 
     let file = fs::File::open(filename).expect("Could not open file");
     let out = fs::File::create(out_filename).expect("Could not create file");
+    let out_buffered = BufWriter::new(out);
+    let mut out_serializer = Serializer::new(out_buffered);
 
     let reader = BufReader::new(file);
 
@@ -38,9 +55,16 @@ fn main() {
 
         let x_str = columns.get(3).unwrap().replace('"', "");
         let y_str = columns.get(4).unwrap().replace('"', "");
-        let x = x_str.parse::<u32>().expect("Could not parse x coordinate");
-        let y = y_str.parse::<u32>().expect("Could not parse y coordinate");
+        let x = x_str.parse::<u16>().expect("Could not parse x coordinate");
+        let y = y_str.parse::<u16>().expect("Could not parse y coordinate");
 
-        println!("{} x: {} y: {} color: {}", timestamp, x, y, color_str.clone());
+        let pixel = PixelPlacement {
+            x,
+            y,
+            seconds_since_epoch: timestamp.signed_duration_since(first_timestamp.unwrap()).num_seconds() as u32,
+            color_index: color_map.get(&color_str).unwrap().clone() as u8,
+        };
+
+        pixel.serialize(&mut out_serializer).unwrap();
     }
 }
