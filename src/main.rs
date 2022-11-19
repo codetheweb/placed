@@ -1,8 +1,4 @@
 use chrono::NaiveDateTime;
-use gzp::deflate::Gzip;
-use gzp::par::compress::ParCompress;
-use gzp::par::compress::ParCompressBuilder;
-use gzp::ZWriter;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
@@ -20,6 +16,11 @@ struct PixelPlacement {
     color_index: u8,
 }
 
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+struct ColorMap {
+    colors: HashMap<String, u16>,
+}
+
 // This isn't very efficient but only needs to run once :)
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -28,17 +29,24 @@ fn main() {
     let out_filename = &args[2];
 
     let file = fs::File::open(filename).expect("Could not open file");
-    let out = fs::File::create(out_filename).expect("Could not create file");
-
-    let mut out_compressed_writer: ParCompress<Gzip> = ParCompressBuilder::new().from_writer(out);
-    let mut out_serializer = Serializer::new(&mut out_compressed_writer);
-
     let mut reader = csv::Reader::from_reader(file);
 
+    // Create archive stream
+    let out = fs::File::create(out_filename).expect("Could not create file");
+
+    let mut archive = zip::ZipWriter::new(out);
+    archive
+        .start_file(
+            "data",
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Bzip2),
+        )
+        .expect("Could not start file");
+    let mut out_serializer = Serializer::new(archive);
+
     let mut first_timestamp = None;
-
-    let mut color_map: HashMap<String, u16> = HashMap::new();
-
+    let mut color_map = ColorMap {
+        colors: HashMap::new(),
+    };
     for result in reader.records() {
         let record = result.expect("Could not read record");
 
@@ -52,8 +60,10 @@ fn main() {
         };
 
         let color_str = record.get(2).unwrap().to_string();
-        if !color_map.contains_key(&color_str) {
-            color_map.insert(color_str.clone(), color_map.len() as u16);
+        if !color_map.colors.contains_key(&color_str) {
+            color_map
+                .colors
+                .insert(color_str.clone(), color_map.colors.len() as u16);
         }
 
         let clean_coords = record.get(3).unwrap().replace('"', "");
@@ -69,11 +79,21 @@ fn main() {
             seconds_since_epoch: timestamp
                 .signed_duration_since(first_timestamp.unwrap())
                 .num_seconds() as u32,
-            color_index: *color_map.get(&color_str).unwrap() as u8,
+            color_index: *color_map.colors.get(&color_str).unwrap() as u8,
         };
 
         pixel.serialize(&mut out_serializer).unwrap();
     }
 
-    out_compressed_writer.finish().unwrap();
+    out_serializer
+        .get_mut()
+        .start_file("colors", zip::write::FileOptions::default())
+        .expect("Could not start file");
+
+    color_map.serialize(&mut out_serializer).unwrap();
+
+    out_serializer
+        .get_mut()
+        .finish()
+        .expect("Could not finish file");
 }
