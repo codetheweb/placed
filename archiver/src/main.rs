@@ -1,25 +1,10 @@
 use chrono::NaiveDateTime;
-use serde::Serialize;
+use rmp_serde::Serializer;
+use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-
-#[macro_use]
-extern crate serde_derive;
-use rmp_serde::Serializer;
-
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-struct PixelPlacement {
-    x: u16,
-    y: u16,
-    seconds_since_epoch: u32,
-    color_index: u8,
-}
-
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-struct ColorMap {
-    colors: HashMap<String, u16>,
-}
+use structures::{ColorMap, PixelPlacement};
 
 // This isn't very efficient but only needs to run once :)
 fn main() {
@@ -36,10 +21,7 @@ fn main() {
 
     let mut archive = zip::ZipWriter::new(out);
     archive
-        .start_file(
-            "data",
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Bzip2),
-        )
+        .start_file("data", zip::write::FileOptions::default())
         .expect("Could not start file");
     let mut out_serializer = Serializer::new(archive);
 
