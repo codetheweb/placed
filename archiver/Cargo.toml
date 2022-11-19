@@ -1,0 +1,13 @@
+[package]
+name = "archiver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.23"
+csv = "1.1.6"
+rmp-serde = "1.1.1"
+serde = "1.0.147"
+serde_derive = "1.0.147"
+tempfile = "3.3.0"
+zip = "0.6.3"
