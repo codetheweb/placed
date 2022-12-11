@@ -4,9 +4,9 @@ use image::Rgb;
 use image::RgbImage;
 use rmp_serde::Deserializer;
 use serde::de::Deserialize;
-use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::Read;
 use structures::{ColorMap, PixelPlacement};
 
 fn main() {
@@ -14,9 +14,11 @@ fn main() {
     let filename = &args[1];
     let file = fs::File::open(filename).expect("Could not open file");
 
-    let mut archive = zip::ZipArchive::new(file).expect("Could not open zip file");
+    let buffered = std::io::BufReader::new(file);
 
-    let mut color_map: HashMap<u8, Rgb<u8>>;
+    let mut archive = zip::ZipArchive::new(buffered).expect("Could not open zip file");
+
+    let mut colors: Vec<Rgb<u8>>;
     {
         let colors_archive = archive
             .by_name("colors")
@@ -26,39 +28,34 @@ fn main() {
         let parsed_color_map: ColorMap = Deserialize::deserialize(&mut color_map_deserializer)
             .expect("Could not deserialize color map");
 
-        // Convert to RGB structs
-        color_map = HashMap::new();
+        // Vec lookup by index is faster than HashMap lookup by key
+        colors = Vec::new();
+        colors.resize(256, Rgb([0, 0, 0]));
         for (color_str, color_id) in parsed_color_map.colors {
             let color =
                 colors_transform::Rgb::from_hex_str(&color_str).expect("Could not parse color");
-            color_map.insert(
-                color_id as u8,
-                Rgb([
-                    color.get_red() as u8,
-                    color.get_green() as u8,
-                    color.get_blue() as u8,
-                ]),
-            );
+
+            colors[color_id as usize] = Rgb([
+                color.get_red() as u8,
+                color.get_green() as u8,
+                color.get_blue() as u8,
+            ]);
         }
     }
 
-    let data = archive.by_name("data").expect("Could not find data file");
-    let mut data_deserializer = Deserializer::new(data);
+    let mut data = archive.by_name("data").expect("Could not find data file");
 
     let mut canvas = RgbImage::new(2000, 2000);
-    let mut i = 0;
-    while let Ok(pixel) = PixelPlacement::deserialize(&mut data_deserializer) {
+
+    let mut buffer = [0u8; std::mem::size_of::<alkahest::Packed<PixelPlacement>>()];
+    while data.read_exact(&mut buffer).is_ok() {
+        let pixel = alkahest::read::<PixelPlacement>(&buffer);
+
         canvas.put_pixel(
             pixel.x as u32,
             pixel.y as u32,
-            *color_map.get(&pixel.color_index).unwrap(),
+            colors[pixel.color_index as usize],
         );
-
-        i += 1;
-
-        if i % 100000 == 0 {
-            println!("Processed {} pixels", i);
-        }
     }
 
     canvas

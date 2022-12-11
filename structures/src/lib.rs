@@ -1,9 +1,9 @@
+// Bug with alkahest?
+#![allow(clippy::drop_copy)]
+
 use std::collections::HashMap;
 
-#[macro_use]
-extern crate serde_derive;
-
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(alkahest::Schema)]
 pub struct PixelPlacement {
     pub x: u16,
     pub y: u16,
@@ -11,7 +11,7 @@ pub struct PixelPlacement {
     pub color_index: u8,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct ColorMap {
     pub colors: HashMap<String, u16>,
 }

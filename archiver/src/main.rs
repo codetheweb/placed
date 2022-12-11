@@ -4,7 +4,8 @@ use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use structures::{ColorMap, PixelPlacement};
+use std::io::Write;
+use structures::{ColorMap, PixelPlacement, PixelPlacementPack};
 
 // This isn't very efficient but only needs to run once :)
 fn main() {
@@ -21,9 +22,11 @@ fn main() {
 
     let mut archive = zip::ZipWriter::new(out);
     archive
-        .start_file("data", zip::write::FileOptions::default())
+        .start_file(
+            "data",
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
         .expect("Could not start file");
-    let mut out_serializer = Serializer::new(archive);
 
     let mut first_timestamp = None;
     let mut color_map = ColorMap {
@@ -55,17 +58,23 @@ fn main() {
         let x = x_str.parse::<u16>().expect("Could not parse x coordinate");
         let y = y_str.parse::<u16>().expect("Could not parse y coordinate");
 
-        let pixel = PixelPlacement {
-            x,
-            y,
-            seconds_since_epoch: timestamp
-                .signed_duration_since(first_timestamp.unwrap())
-                .num_seconds() as u32,
-            color_index: *color_map.colors.get(&color_str).unwrap() as u8,
-        };
+        let mut data = [0u8; std::mem::size_of::<alkahest::Packed<PixelPlacement>>()];
+        alkahest::write(
+            &mut data,
+            PixelPlacementPack {
+                x,
+                y,
+                seconds_since_epoch: timestamp
+                    .signed_duration_since(first_timestamp.unwrap())
+                    .num_seconds() as u32,
+                color_index: *color_map.colors.get(&color_str).unwrap() as u8,
+            },
+        );
 
-        pixel.serialize(&mut out_serializer).unwrap();
+        archive.write_all(&data).unwrap();
     }
+
+    let mut out_serializer = Serializer::new(archive);
 
     out_serializer
         .get_mut()

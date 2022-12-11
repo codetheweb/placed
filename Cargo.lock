@@ -21,6 +21,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "alkahest"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "631a0c0a3e1a64558bb2552a3893102c428d5e88a0e3f0a6979a7a67328c1e1b"
+dependencies = [
+ "alkahest-proc",
+ "bytemuck",
+]
+
+[[package]]
+name = "alkahest-proc"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8087db15c316edb2432048cfd2f3f848ee22887f9d717d7375bf7b666a59e7e7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -33,6 +54,7 @@ dependencies = [
 name = "archiver"
 version = "0.1.0"
 dependencies = [
+ "alkahest",
  "chrono",
  "csv",
  "rmp-serde",
@@ -828,6 +850,7 @@ dependencies = [
 name = "reader"
 version = "0.1.0"
 dependencies = [
+ "alkahest",
  "colors-transform",
  "image",
  "rmp-serde",
@@ -964,6 +987,7 @@ dependencies = [
 name = "structures"
 version = "0.1.0"
 dependencies = [
+ "alkahest",
  "rmp-serde",
  "serde",
  "serde_derive",

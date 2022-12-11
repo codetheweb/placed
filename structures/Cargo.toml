@@ -9,3 +9,4 @@ edition = "2021"
 rmp-serde = "1.1.1"
 serde = "1.0.147"
 serde_derive = "1.0.147"
+alkahest = { version = "0.1.5", features = ["derive"] }
