@@ -1,2 +1,2 @@
 [workspace]
-members = ["archiver", "reader", "structures"]
+members = ["archiver", "reader", "structures", "cli"]

@@ -2,3 +2,4 @@
 *.bin
 flamegraph.svg
 .DS_Store
+*.png

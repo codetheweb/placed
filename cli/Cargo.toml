@@ -1,0 +1,9 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+archiver = { path = "../archiver" }
+reader = { path = "../reader" }
+clap = { version = "4.0.29", features = ["derive"] }
