@@ -103,16 +103,15 @@ impl PlacedArchive {
             Err(err) => panic!("Could not open archive: {}", err),
         };
 
-        let buffered_file = BufReader::new(file);
-
-        let mut archive =
-            ArchiveReader::from_config(buffered_file, ArchiveReaderConfig::default()).unwrap();
+        let mut archive = ArchiveReader::from_config(file, ArchiveReaderConfig::default()).unwrap();
 
         let mut data_file = archive
             .get_file("data".to_string())
             .unwrap()
             .expect("Could not find data file");
 
-        process_reader(&mut data_file.data)
+        let mut buffered_data = BufReader::new(&mut data_file.data);
+
+        process_reader(&mut buffered_data)
     }
 }

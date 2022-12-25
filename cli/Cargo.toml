@@ -7,3 +7,4 @@ edition = "2021"
 archiver = { path = "../archiver" }
 reader = { path = "../reader" }
 clap = { version = "4.0.29", features = ["derive"] }
+byte-unit = "4.0.18"
