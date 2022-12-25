@@ -1,10 +1,12 @@
 use chrono::NaiveDateTime;
+use mla::config::ArchiveWriterConfig;
+use mla::ArchiveWriter;
 use reader::PlacedArchive;
 use rmp_serde::Serializer;
 use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::BufWriter;
 use structures::{ColorMap, Meta, PixelPlacement, PixelPlacementPack};
 
 // This isn't very efficient but only needs to run once :)
@@ -13,15 +15,14 @@ pub fn pack(in_file: String, out_file: String) {
     let mut reader = csv::Reader::from_reader(file);
 
     // Create archive stream
-    let out = fs::File::create(out_file).expect("Could not create file");
+    let out_file = fs::File::create(out_file).expect("Could not create file");
+    let mut buffered_out_file = BufWriter::new(out_file);
 
-    let mut archive = zip::ZipWriter::new(out);
-    archive
-        .start_file(
-            "data",
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored),
-        )
-        .expect("Could not start file");
+    let mut archive_config = ArchiveWriterConfig::default();
+    archive_config.disable_layer(mla::Layers::ENCRYPT);
+
+    let mut mla = ArchiveWriter::from_config(&mut buffered_out_file, archive_config).unwrap();
+    let data_file_id = mla.start_file("data").unwrap();
 
     let mut first_timestamp = None;
     let mut color_map = ColorMap {
@@ -75,32 +76,30 @@ pub fn pack(in_file: String, out_file: String) {
             },
         );
 
-        archive.write_all(&data).unwrap();
+        mla.append_file_content(data_file_id, data.len() as u64, data.as_slice())
+            .unwrap();
 
         meta.num_of_pixel_placements += 1;
         meta.last_pixel_placed_at_seconds_since_epoch = seconds_since_epoch;
     }
 
-    let mut out_serializer = Serializer::new(archive);
+    mla.end_file(data_file_id).unwrap();
 
-    out_serializer
-        .get_mut()
-        .start_file("colors", zip::write::FileOptions::default())
-        .expect("Could not start file");
+    let mut color_buffer = Vec::new();
+    let mut color_serializer = Serializer::new(&mut color_buffer);
 
-    color_map.serialize(&mut out_serializer).unwrap();
+    color_map.serialize(&mut color_serializer).unwrap();
+    mla.add_file("colors", color_buffer.len() as u64, color_buffer.as_slice())
+        .unwrap();
 
-    out_serializer
-        .get_mut()
-        .start_file("meta", zip::write::FileOptions::default())
-        .expect("Could not start file");
+    let mut meta_buffer = Vec::new();
+    let mut meta_serializer = Serializer::new(&mut meta_buffer);
 
-    meta.serialize(&mut out_serializer).unwrap();
+    meta.serialize(&mut meta_serializer).unwrap();
+    mla.add_file("meta", meta_buffer.len() as u64, meta_buffer.as_slice())
+        .unwrap();
 
-    out_serializer
-        .get_mut()
-        .finish()
-        .expect("Could not finish file");
+    mla.finalize().unwrap();
 }
 
 pub fn generate_snapshots(in_file: String, out_file: String, num_snapshots: u16) {

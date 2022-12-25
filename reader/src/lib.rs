@@ -1,9 +1,10 @@
 use colors_transform::Color;
 use image::{Rgb, RgbImage};
+use mla::{config::ArchiveReaderConfig, ArchiveReader};
 use rmp_serde::Deserializer;
 use serde::de::Deserialize;
 use std::fs::File;
-use std::io::BufRead;
+use std::io::{BufReader, Read};
 use structures::{ColorMap, Meta, PixelPlacement};
 
 pub struct PlacedArchive {
@@ -19,15 +20,16 @@ impl PlacedArchive {
             Err(err) => return Err(err),
         };
 
-        let buffered = std::io::BufReader::new(file);
-        let mut archive = zip::ZipArchive::new(buffered).expect("Could not open zip file");
+        let mut archive = ArchiveReader::from_config(file, ArchiveReaderConfig::new()).unwrap();
 
         let mut colors: Vec<Rgb<u8>>;
         {
             let colors_archive = archive
-                .by_name("colors")
+                .get_file("colors".to_string())
+                .unwrap()
                 .expect("Could not find colors file");
-            let mut color_map_deserializer = Deserializer::new(colors_archive);
+
+            let mut color_map_deserializer = Deserializer::new(colors_archive.data);
 
             let parsed_color_map: ColorMap = Deserialize::deserialize(&mut color_map_deserializer)
                 .expect("Could not deserialize color map");
@@ -49,8 +51,12 @@ impl PlacedArchive {
 
         let parsed_meta: Meta;
         {
-            let meta_file = archive.by_name("meta").expect("Could not find meta file");
-            let mut meta_deserializer = Deserializer::new(meta_file);
+            let meta_archive = archive
+                .get_file("meta".to_string())
+                .unwrap()
+                .expect("Could not find meta file");
+
+            let mut meta_deserializer = Deserializer::new(meta_archive.data);
             parsed_meta = Deserialize::deserialize(&mut meta_deserializer)
                 .expect("Could not deserialize meta");
         }
@@ -90,17 +96,23 @@ impl PlacedArchive {
 
     fn process_data<C>(&self, process_reader: C)
     where
-        C: FnOnce(&mut dyn BufRead),
+        C: FnOnce(&mut dyn Read),
     {
         let file = match File::open(&self.archive_path) {
             Ok(file) => file,
             Err(err) => panic!("Could not open archive: {}", err),
         };
 
-        let mut archive = zip::ZipArchive::new(&file).expect("Could not open zip file");
-        let data = archive.by_name("data").expect("Could not find data file");
-        let mut buffered_data_reader = std::io::BufReader::new(data);
+        let buffered_file = BufReader::new(file);
 
-        process_reader(&mut buffered_data_reader)
+        let mut archive =
+            ArchiveReader::from_config(buffered_file, ArchiveReaderConfig::default()).unwrap();
+
+        let mut data_file = archive
+            .get_file("data".to_string())
+            .unwrap()
+            .expect("Could not find data file");
+
+        process_reader(&mut data_file.data)
     }
 }
