@@ -1,41 +1,10 @@
 use chrono::NaiveDateTime;
-use mla::config::ArchiveWriterConfig;
-use mla::layers::compress;
-use mla::ArchiveWriter;
 use reader::PlacedArchive;
-use rmp_serde::Serializer;
-use serde::ser::Serialize;
+use std::collections::HashMap;
 use std::fs;
-use std::io::BufWriter;
-use std::{collections::HashMap, io::Write};
-use structures::{ColorMap, Meta, PixelPlacement, PixelPlacementPack};
-
-struct WriterForArchive<'a> {
-    archive: ArchiveWriter<'a, &'a mut BufWriter<fs::File>>,
-    file_id: u64,
-}
-
-impl Write for WriterForArchive<'_> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        self.archive
-            .append_file_content(self.file_id, buf.len() as u64, buf)
-            .unwrap();
-
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> WriterForArchive<'a> {
-    fn finish(mut self) -> ArchiveWriter<'a, &'a mut BufWriter<fs::File>> {
-        self.archive.end_file(self.file_id).unwrap();
-
-        self.archive
-    }
-}
+use std::io::{BufWriter, Seek};
+use structures::{Meta, PixelPlacement};
+use tempfile::tempfile;
 
 // This isn't very efficient but only needs to run once :)
 /// Creates a MLA archive from a CSV file.
@@ -51,37 +20,17 @@ pub fn pack(
     let mut reader = csv::Reader::from_reader(file);
 
     // Create archive stream
-    let out_file = fs::File::create(out_file).expect("Could not create file");
-    let mut buffered_out_file = BufWriter::with_capacity(block_size, out_file);
+    let mut out_file = fs::File::create(out_file).expect("Could not create file");
 
-    let mut archive_config = ArchiveWriterConfig::default();
-    archive_config.disable_layer(mla::Layers::ENCRYPT);
+    let mut temp_pixel_data_file = tempfile().unwrap();
 
-    if !compressed {
-        archive_config.disable_layer(mla::Layers::COMPRESS);
-    }
+    let mut colors = HashMap::new();
 
-    let mut mla = ArchiveWriter::from_config(&mut buffered_out_file, archive_config).unwrap();
-    let data_file_id = mla.start_file("data").unwrap();
-
-    let mut data_writer_unbuffered = WriterForArchive {
-        archive: mla,
-        file_id: data_file_id,
-    };
-
-    let mut color_map = ColorMap {
-        colors: HashMap::new(),
-    };
-
-    let mut meta = Meta {
-        width: 2_000,
-        height: 2_000,
-        num_of_pixel_placements: 0,
-        last_pixel_placed_at_seconds_since_epoch: 0,
-    };
+    let mut num_of_pixel_placements = 0;
+    let mut last_pixel_placed_at_seconds_since_epoch = 0;
 
     {
-        let mut data_writer_buffered = BufWriter::new(&mut data_writer_unbuffered);
+        let mut data_writer_buffered = BufWriter::new(&mut temp_pixel_data_file);
 
         let mut first_timestamp = None;
 
@@ -98,10 +47,8 @@ pub fn pack(
             };
 
             let color_str = record.get(2).unwrap().to_string();
-            if !color_map.colors.contains_key(&color_str) {
-                color_map
-                    .colors
-                    .insert(color_str.clone(), color_map.colors.len() as u16);
+            if !colors.contains_key(&color_str) {
+                colors.insert(color_str.clone(), colors.len() as u16);
             }
 
             let clean_coords = record.get(3).unwrap().replace('"', "");
@@ -118,41 +65,38 @@ pub fn pack(
                 break;
             }
 
-            let mut data = [0u8; std::mem::size_of::<alkahest::Packed<PixelPlacement>>()];
-            alkahest::write(
-                &mut data,
-                PixelPlacementPack {
+            bincode::encode_into_std_write(
+                PixelPlacement {
                     x,
                     y,
                     seconds_since_epoch,
-                    color_index: *color_map.colors.get(&color_str).unwrap() as u8,
+                    color_index: *colors.get(&color_str).unwrap() as u8,
                 },
-            );
+                &mut data_writer_buffered,
+                bincode::config::standard(),
+            )
+            .unwrap();
 
-            data_writer_buffered.write_all(&data).unwrap();
-
-            meta.num_of_pixel_placements += 1;
-            meta.last_pixel_placed_at_seconds_since_epoch = seconds_since_epoch;
+            num_of_pixel_placements += 1;
+            last_pixel_placed_at_seconds_since_epoch = seconds_since_epoch;
         }
     }
 
-    let mut mla = data_writer_unbuffered.finish();
+    let meta = Meta {
+        width: 2000,
+        height: 2000,
+        num_of_pixel_placements,
+        last_pixel_placed_at_seconds_since_epoch,
+        colors,
+    };
 
-    let mut color_buffer = Vec::new();
-    let mut color_serializer = Serializer::new(&mut color_buffer);
+    bincode::encode_into_std_write(meta, &mut out_file, bincode::config::standard()).unwrap();
 
-    color_map.serialize(&mut color_serializer).unwrap();
-    mla.add_file("colors", color_buffer.len() as u64, color_buffer.as_slice())
+    // Copy from temp file
+    temp_pixel_data_file
+        .seek(std::io::SeekFrom::Start(0))
         .unwrap();
-
-    let mut meta_buffer = Vec::new();
-    let mut meta_serializer = Serializer::new(&mut meta_buffer);
-
-    meta.serialize(&mut meta_serializer).unwrap();
-    mla.add_file("meta", meta_buffer.len() as u64, meta_buffer.as_slice())
-        .unwrap();
-
-    mla.finalize().unwrap();
+    std::io::copy(&mut temp_pixel_data_file, &mut out_file).unwrap();
 }
 
 pub fn generate_snapshots(in_file: String, out_file: String, num_snapshots: u16) {
