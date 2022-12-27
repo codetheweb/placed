@@ -1,14 +1,20 @@
 use colors_transform::Color;
 use image::{Rgb, RgbImage};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use structures::{Meta, PixelPlacement};
+
+struct LastRenderedCanvas {
+    canvas: RgbImage,
+    rendered_up_to_seconds: u32,
+    rendered_up_to_offset: u64,
+}
 
 pub struct PlacedArchive {
     pub meta: Meta,
     colors: Vec<Rgb<u8>>,
     archive_path: String,
+    last_rendered_canvas: Option<LastRenderedCanvas>,
 }
 
 impl PlacedArchive {
@@ -41,20 +47,37 @@ impl PlacedArchive {
             meta,
             colors,
             archive_path,
+            last_rendered_canvas: None,
         })
     }
 
     /// Renders the image up to the given number of seconds.
     /// If seconds is 0, renders the entire image.
     pub fn render_up_to(&mut self, seconds: u32) -> RgbImage {
-        let mut canvas = RgbImage::new(self.meta.width.into(), self.meta.height.into());
+        let mut canvas: RgbImage;
 
-        self.process_data(|data| {
+        if let Some(last_rendered_canvas) = &self.last_rendered_canvas {
+            canvas = last_rendered_canvas.canvas.clone();
+        } else {
+            canvas = RgbImage::new(self.meta.width.into(), self.meta.height.into());
+        }
+
+        let mut rendered_up_to_offset = 0;
+        self.process_pixel_data(|data| {
+            if let Some(last_rendered_canvas) = &self.last_rendered_canvas {
+                if last_rendered_canvas.rendered_up_to_seconds < seconds {
+                    data.seek(std::io::SeekFrom::Start(
+                        last_rendered_canvas.rendered_up_to_offset,
+                    ))
+                    .unwrap();
+                }
+            }
+
             while let Ok(pixel) = bincode::decode_from_std_read::<
                 PixelPlacement,
                 bincode::config::Configuration,
-                Box<&mut dyn Read>,
-            >(&mut Box::new(data), bincode::config::standard())
+                BufReader<&mut File>,
+            >(data, bincode::config::standard())
             {
                 if pixel.seconds_since_epoch > seconds && seconds != 0 {
                     break;
@@ -66,26 +89,47 @@ impl PlacedArchive {
                     self.colors[pixel.color_index as usize],
                 );
             }
+
+            rendered_up_to_offset = data.seek(std::io::SeekFrom::Current(0)).unwrap();
+        });
+
+        self.last_rendered_canvas = Some(LastRenderedCanvas {
+            canvas: canvas.clone(),
+            rendered_up_to_seconds: seconds,
+            rendered_up_to_offset,
         });
 
         canvas
     }
 
-    fn process_data<C>(&self, process_reader: C)
+    pub fn process_pixel_data<C>(&self, process_reader: C)
     where
-        C: FnOnce(&mut dyn Read),
+        C: FnOnce(&mut BufReader<&mut File>),
     {
         let mut file = match File::open(&self.archive_path) {
             Ok(file) => file,
             Err(err) => panic!("Could not open archive: {}", err),
         };
 
-        // Skip metadata
-        let _: Meta =
-            bincode::decode_from_std_read(&mut file, bincode::config::standard()).unwrap();
+        PlacedArchive::seek_to_pixel_data(&mut file);
 
         let mut buffered_data = BufReader::new(&mut file);
 
         process_reader(&mut buffered_data)
+    }
+
+    pub fn seek_to_pixel_data<R: Read + Seek>(r: &mut R) {
+        r.seek(SeekFrom::Start(0)).unwrap();
+
+        let meta: Meta = bincode::decode_from_std_read(r, bincode::config::standard()).unwrap();
+
+        let meta_end_offfset = r.seek(SeekFrom::Current(0)).unwrap();
+
+        if let Some(last_snapshot) = meta.snapshots.last() {
+            r.seek(std::io::SeekFrom::Start(
+                last_snapshot.start_offset + last_snapshot.length + meta_end_offfset,
+            ))
+            .unwrap();
+        }
     }
 }

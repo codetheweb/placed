@@ -3,11 +3,11 @@ use reader::PlacedArchive;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufWriter, Seek};
-use structures::{Meta, PixelPlacement};
+use structures::{Meta, PixelPlacement, Snapshot};
 use tempfile::tempfile;
 
 // This isn't very efficient but only needs to run once :)
-/// Creates a MLA archive from a CSV file.
+/// Creates an archive from a CSV file.
 /// If `pack_up_to_seconds` is set to 0, the entire history will be packed.
 pub fn pack(
     in_file: String,
@@ -88,6 +88,7 @@ pub fn pack(
         num_of_pixel_placements,
         last_pixel_placed_at_seconds_since_epoch,
         colors,
+        snapshots: Vec::new(),
     };
 
     bincode::encode_into_std_write(meta, &mut out_file, bincode::config::standard()).unwrap();
@@ -99,8 +100,8 @@ pub fn pack(
     std::io::copy(&mut temp_pixel_data_file, &mut out_file).unwrap();
 }
 
-pub fn generate_snapshots(in_file: String, out_file: String, num_snapshots: u16) {
-    let archive = PlacedArchive::load(in_file).expect("Could not load archive");
+pub fn generate_snapshots(in_file_path: String, out_file_path: String, num_snapshots: u16) {
+    let mut archive = PlacedArchive::load(in_file_path.clone()).expect("Could not load archive");
 
     let mut snapshot_points_in_seconds: Vec<u32> = Vec::new();
     let seconds_between_snapshots =
@@ -108,4 +109,47 @@ pub fn generate_snapshots(in_file: String, out_file: String, num_snapshots: u16)
     for i in 0..num_snapshots {
         snapshot_points_in_seconds.push((i as u32) * seconds_between_snapshots);
     }
+
+    let mut temp_snapshot_file = tempfile().unwrap();
+
+    let mut snapshots: Vec<Snapshot> = Vec::new();
+
+    for snapshot_point in snapshot_points_in_seconds {
+        let snapshot = archive.render_up_to(snapshot_point);
+        let start_offset = temp_snapshot_file
+            .seek(std::io::SeekFrom::Current(0))
+            .unwrap();
+        snapshot
+            .write_to(&mut temp_snapshot_file, image::ImageOutputFormat::Png)
+            .unwrap();
+        let end_offset = temp_snapshot_file
+            .seek(std::io::SeekFrom::Current(0))
+            .unwrap();
+        let length = end_offset - start_offset;
+
+        snapshots.push(Snapshot {
+            up_to_seconds_since_epoch: snapshot_point,
+            start_offset,
+            length,
+        });
+    }
+
+    let mut out_file = fs::File::create(out_file_path).expect("Could not create file");
+
+    let mut meta = archive.meta.clone();
+    meta.snapshots = snapshots;
+
+    bincode::encode_into_std_write(meta, &mut out_file, bincode::config::standard()).unwrap();
+
+    // Copy snapshots from temp file
+    temp_snapshot_file
+        .seek(std::io::SeekFrom::Start(0))
+        .unwrap();
+    std::io::copy(&mut temp_snapshot_file, &mut out_file).unwrap();
+
+    // Copy pixel data
+    let mut in_file = fs::File::open(in_file_path).expect("Could not open file");
+
+    PlacedArchive::seek_to_pixel_data(&mut in_file);
+    std::io::copy(&mut in_file, &mut out_file).unwrap();
 }
