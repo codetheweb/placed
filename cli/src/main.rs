@@ -1,5 +1,4 @@
 use archiver::{generate_snapshots, pack};
-use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -13,16 +12,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Repack data from a CSV into a zip containing colors and pixels
-    Pack {
-        in_file: String,
-        out_file: String,
-        #[clap(short, long, default_value = "0")]
-        up_to_seconds: u32,
-        #[clap(short, long, default_value = "4MB")]
-        block_size: String,
-        #[clap(short, long, default_value = "true")]
-        compress: bool,
-    },
+    Pack { in_file: String, out_file: String },
     /// Add snapshots to an existing zip
     GenerateSnapshots {
         in_file: String,
@@ -43,20 +33,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Pack {
-            in_file,
-            out_file,
-            up_to_seconds,
-            block_size,
-            compress,
-        } => {
-            pack(
-                in_file,
-                out_file,
-                Byte::from_str(block_size).unwrap().get_bytes() as usize,
-                up_to_seconds,
-                compress,
-            );
+        Commands::Pack { in_file, out_file } => {
+            pack(in_file, out_file);
         }
         Commands::GenerateSnapshots {
             in_file,

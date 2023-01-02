@@ -6,45 +6,46 @@ use std::io::{BufWriter, Seek};
 use structures::{Meta, PixelPlacement, Snapshot};
 use tempfile::tempfile;
 
-// This isn't very efficient but only needs to run once :)
+#[derive(Debug, PartialEq, Eq)]
+pub struct TilePlacement {
+    pub x: u16,
+    pub y: u16,
+    pub placed_at: NaiveDateTime,
+    pub color_index: u8,
+}
+
+impl PartialOrd for TilePlacement {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.placed_at.cmp(&other.placed_at))
+    }
+}
+
+impl Ord for TilePlacement {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.placed_at.cmp(&other.placed_at)
+    }
+}
+
 /// Creates an archive from a CSV file.
-/// If `pack_up_to_seconds` is set to 0, the entire history will be packed.
-pub fn pack(
-    in_file: String,
-    out_file: String,
-    block_size: usize,
-    pack_up_to_seconds: u32,
-    compressed: bool,
-) {
+pub fn pack(in_file: String, out_file: String) {
     let file = fs::File::open(in_file).expect("Could not open file");
     let mut reader = csv::Reader::from_reader(file);
 
     // Create archive stream
     let mut out_file = fs::File::create(out_file).expect("Could not create file");
 
-    let mut temp_pixel_data_file = tempfile().unwrap();
-
     let mut colors = HashMap::new();
 
-    let mut num_of_pixel_placements = 0;
-    let mut last_pixel_placed_at_seconds_since_epoch = 0;
+    // We buffer all tiles into memory so we can sort them by timestamp
+    let mut tile_placements = Vec::new();
 
     {
-        let mut data_writer_buffered = BufWriter::new(&mut temp_pixel_data_file);
-
-        let mut first_timestamp = None;
-
         for result in reader.records() {
             let record = result.expect("Could not read record");
 
             let timestamp =
                 NaiveDateTime::parse_from_str(record.get(0).unwrap(), "%Y-%m-%d %H:%M:%S%.3f UTC")
                     .expect("Could not parse timestamp");
-
-            first_timestamp = match first_timestamp {
-                Some(first_timestamp) => Some(first_timestamp),
-                None => Some(timestamp),
-            };
 
             let color_str = record.get(2).unwrap().to_string();
             if !colors.contains_key(&color_str) {
@@ -57,47 +58,50 @@ pub fn pack(
             let y_str = coords.next().unwrap();
             let x = x_str.parse::<u16>().expect("Could not parse x coordinate");
             let y = y_str.parse::<u16>().expect("Could not parse y coordinate");
-            let seconds_since_epoch = timestamp
-                .signed_duration_since(first_timestamp.unwrap())
-                .num_seconds() as u32;
 
-            if pack_up_to_seconds != 0 && seconds_since_epoch > pack_up_to_seconds {
-                break;
-            }
-
-            bincode::encode_into_std_write(
-                PixelPlacement {
-                    x,
-                    y,
-                    seconds_since_epoch,
-                    color_index: *colors.get(&color_str).unwrap() as u8,
-                },
-                &mut data_writer_buffered,
-                bincode::config::standard(),
-            )
-            .unwrap();
-
-            num_of_pixel_placements += 1;
-            last_pixel_placed_at_seconds_since_epoch = seconds_since_epoch;
+            tile_placements.push(TilePlacement {
+                x,
+                y,
+                placed_at: timestamp,
+                color_index: *colors.get(&color_str).unwrap() as u8,
+            });
         }
     }
+
+    tile_placements.sort();
+
+    let first_tile_placed_at = tile_placements.first().unwrap().placed_at;
 
     let meta = Meta {
         width: 2000,
         height: 2000,
-        num_of_pixel_placements,
-        last_pixel_placed_at_seconds_since_epoch,
+        num_of_pixel_placements: tile_placements.len() as u32,
+        // todo
+        last_pixel_placed_at_seconds_since_epoch: 0,
         colors,
         snapshots: Vec::new(),
     };
 
     bincode::encode_into_std_write(meta, &mut out_file, bincode::config::standard()).unwrap();
 
-    // Copy from temp file
-    temp_pixel_data_file
-        .seek(std::io::SeekFrom::Start(0))
+    // Write tile placements
+    let mut data_writer_buffered = BufWriter::new(&mut out_file);
+    for tile_placement in tile_placements {
+        bincode::encode_into_std_write(
+            PixelPlacement {
+                x: tile_placement.x,
+                y: tile_placement.y,
+                ms_since_epoch: tile_placement
+                    .placed_at
+                    .signed_duration_since(first_tile_placed_at)
+                    .num_milliseconds() as u32,
+                color_index: tile_placement.color_index,
+            },
+            &mut data_writer_buffered,
+            bincode::config::standard(),
+        )
         .unwrap();
-    std::io::copy(&mut temp_pixel_data_file, &mut out_file).unwrap();
+    }
 }
 
 pub fn generate_snapshots(in_file_path: String, out_file_path: String, num_snapshots: u16) {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 pub struct PixelPlacement {
     pub x: u16,
     pub y: u16,
-    pub seconds_since_epoch: u32,
+    pub ms_since_epoch: u32,
     pub color_index: u8,
 }
 

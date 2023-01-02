@@ -60,6 +60,7 @@ impl PlacedArchive {
             canvas = last_rendered_canvas.canvas.clone();
         } else {
             canvas = RgbImage::new(self.meta.width.into(), self.meta.height.into());
+            canvas.fill(0xff);
         }
 
         let mut rendered_up_to_offset = 0;
@@ -79,7 +80,7 @@ impl PlacedArchive {
                 BufReader<&mut File>,
             >(data, bincode::config::standard())
             {
-                if pixel.seconds_since_epoch > seconds && seconds != 0 {
+                if (pixel.ms_since_epoch / 1000) > seconds && seconds != 0 {
                     break;
                 }
 
