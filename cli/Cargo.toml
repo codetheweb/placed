@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-archiver = { path = "../archiver" }
+archive = { path = "../archive" }
 reader = { path = "../reader" }
 clap = { version = "4.0.29", features = ["derive"] }
 byte-unit = "4.0.18"
+chrono = "0.4.23"
+csv = "1.1.6"
+colors-transform = "0.2.11"

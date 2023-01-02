@@ -1,2 +1,3 @@
 [workspace]
-members = ["archiver", "reader", "structures", "cli"]
+members = ["reader", "structures", "cli", "player", "archive"]
+resolver = "2"
