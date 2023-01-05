@@ -1,4 +1,4 @@
-use archive::PlacedArchiveWriter;
+use archive::{PlacedArchiveReader, PlacedArchiveWriter};
 use chrono::NaiveDateTime;
 use clap::{Parser, Subcommand};
 use colors_transform::Color;
@@ -15,7 +15,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Repack data from a CSV into an archive containing color and tile data
-    Pack { in_file: String, out_file: String },
+    Pack {
+        in_file: String,
+        out_file: String,
+    },
     /// Render history to an image
     Render {
         archive_path: String,
@@ -23,6 +26,9 @@ enum Commands {
         #[clap(short, long, default_value = "0")]
         /// if 0, render all history
         up_to_seconds: u32,
+    },
+    Play {
+        archive_path: String,
     },
 }
 
@@ -78,9 +84,27 @@ fn main() {
             out_file,
             up_to_seconds,
         } => {
-            let mut placed_archive = reader::PlacedArchive::load(archive_path).unwrap();
-            let image = placed_archive.render_up_to(up_to_seconds);
-            image.save(out_file).unwrap();
+            let file = File::open(archive_path).expect("Could not open file");
+            let reader = PlacedArchiveReader::new(file).expect("Could not read archive");
+            let canvas_size = reader.meta.get_largest_canvas_size().unwrap();
+
+            let mut canvas =
+                image::RgbaImage::new(canvas_size.width as u32, canvas_size.height as u32);
+
+            canvas.fill(0xff);
+
+            for tile in reader {
+                if tile.ms_since_epoch > up_to_seconds * 1000 && up_to_seconds != 0 {
+                    break;
+                }
+
+                canvas.put_pixel(tile.x as u32, tile.y as u32, image::Rgba(tile.color));
+            }
+
+            canvas.save(out_file).expect("Could not save image");
+        }
+        Commands::Play { archive_path } => {
+            player::play(archive_path);
         }
     }
 }
