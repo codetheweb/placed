@@ -1,12 +1,41 @@
 use bincode::{Decode, Encode};
 use std::collections::HashMap;
 
+use crate::constants::BINCODE_CONFIG;
+
 #[derive(Encode, Decode, PartialEq, Eq, Debug)]
-pub struct TilePlacement {
+pub struct StoredTilePlacement {
     pub x: u16,
     pub y: u16,
     pub ms_since_epoch: u32,
     pub color_index: u8,
+}
+
+impl StoredTilePlacement {
+    pub fn encoded_size() -> usize {
+        let mut buf = Vec::new();
+        bincode::encode_into_std_write(
+            StoredTilePlacement {
+                x: 0,
+                y: 0,
+                ms_since_epoch: 0,
+                color_index: 0,
+            },
+            &mut buf,
+            BINCODE_CONFIG,
+        )
+        .unwrap();
+
+        buf.len()
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct DecodedTilePlacement {
+    pub x: u16,
+    pub y: u16,
+    pub ms_since_epoch: u32,
+    pub color: [u8; 4],
 }
 
 #[derive(Encode, Decode, PartialEq, Eq, Debug, Clone)]

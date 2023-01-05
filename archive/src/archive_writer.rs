@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
 };
 
+// todo: try different compression (frame grid, encode each second in an array, even if nothing changed)
 use chrono::NaiveDateTime;
 use image::RgbImage;
 use mla::{config::ArchiveWriterConfig, ArchiveWriter};
@@ -10,7 +11,7 @@ use tempfile::tempfile;
 
 use crate::{
     constants::BINCODE_CONFIG,
-    structures::{CanvasSizeChange, ChunkDescription, Meta, TilePlacement},
+    structures::{CanvasSizeChange, ChunkDescription, Meta, StoredTilePlacement},
 };
 
 // todo: make parameter
@@ -72,7 +73,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
     }
 
     pub fn finalize(&mut self) {
-        self.tile_placements.sort();
+        self.tile_placements.sort_unstable();
 
         let first_tile_placed_at = self.tile_placements.first().unwrap().placed_at;
         let num_of_tiles_in_chunk = self.tile_placements.len() as u32 / NUM_CHUNKS;
@@ -88,7 +89,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
 
             for tile in tiles {
                 bincode::encode_into_std_write(
-                    TilePlacement {
+                    StoredTilePlacement {
                         x: tile.x,
                         y: tile.y,
                         ms_since_epoch: tile
