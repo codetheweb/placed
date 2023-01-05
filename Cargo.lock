@@ -354,7 +354,8 @@ dependencies = [
  "clap",
  "colors-transform",
  "csv",
- "reader",
+ "image",
+ "player",
 ]
 
 [[package]]
@@ -940,6 +941,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "game-loop"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd62d243b7fde7998a255fd44b7435829f28b0e3b636ab1050fea5c7db92ce5"
+dependencies = [
+ "wasm-bindgen",
+ "web-sys",
+ "winit",
 ]
 
 [[package]]
@@ -1714,9 +1726,14 @@ checksum = "6ac9a59f73473f1b8d852421e59e64809f025994837ef743615c6d0c5b305160"
 name = "player"
 version = "0.1.0"
 dependencies = [
+ "archive",
+ "bytemuck",
  "colors-transform",
+ "game-loop",
  "pixels",
- "reader",
+ "pollster",
+ "ultraviolet",
+ "wgpu",
  "winit",
  "winit_input_helper",
 ]

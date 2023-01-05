@@ -1,0 +1,18 @@
+[package]
+name = "player"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+archive = { path = "../archive" }
+colors-transform = "0.2.11"
+game-loop = { version = "0.10.0", features = ["winit"] }
+pixels = "0.11.0"
+wgpu = "0.14.2"
+winit = "0.27"
+winit_input_helper = "0.13"
+pollster = "0.2"
+ultraviolet = "0.9.0"
+bytemuck = "1.12.3"
