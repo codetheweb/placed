@@ -100,7 +100,8 @@ pub fn play(archive_path: String) -> i32 {
 
     // let game = Game {};
 
-    let state = ai::PixelArtRenderer::new(&window);
+    let mut state = ai::PixelArtRenderer::new(&window);
+    state.clear(wgpu::Color::WHITE);
     let p = Player::new(reader, state);
 
     // let state = state::State::new(&window);

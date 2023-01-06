@@ -2,14 +2,9 @@ use std::num::NonZeroU32;
 
 use crate::renderers::{ScalingRenderer, SurfaceSize};
 use wgpu::{
-    util::DeviceExt, Adapter, BufferUsages, Device, ImageCopyBuffer, ImageCopyTexture,
-    ImageDataLayout, Queue, Surface, Texture, TextureView,
+    Adapter, Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView,
 };
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::Window,
-};
+use winit::window::Window;
 
 pub struct PixelArtRenderer {
     surface: Surface,
@@ -21,6 +16,7 @@ pub struct PixelArtRenderer {
 
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
     pub scaling_renderer: ScalingRenderer,
+    pending_texture_updates: Vec<(u32, u32, [u8; 4])>,
 }
 
 impl PixelArtRenderer {
@@ -111,75 +107,46 @@ impl PixelArtRenderer {
             texture,
             texture_view,
             scaling_renderer,
+            pending_texture_updates: Vec::new(),
         }
     }
 
     pub fn update_pixel(&mut self, x: u32, y: u32, color: [u8; 4]) {
-        // println!("Updating pixel at {}, {} {:?}", x, y, color);
-        // Create a staging buffer with enough capacity to hold a single pixel
-        let staging_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: &color,
-                usage: BufferUsages::COPY_SRC,
-            });
-
-        let data_layout = ImageDataLayout {
-            offset: 0,
-            bytes_per_row: NonZeroU32::new(256),
-            rows_per_image: None,
-        };
-
-        // Create a command encoder
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        self.queue.write_texture(
-            ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: x, y: y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &color,
-            data_layout,
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        // Copy the staging buffer into the texture at the specified coordinates
-        encoder.copy_buffer_to_texture(
-            ImageCopyBuffer {
-                buffer: &staging_buffer,
-                layout: data_layout,
-            },
-            ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: x, y: y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        // Submit the command buffer
-        self.queue.submit(Some(encoder.finish()));
+        self.pending_texture_updates.push((x, y, color));
     }
 
     pub fn render(&mut self) {
         let frame = self.surface.get_current_texture().unwrap();
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
+
+        // Update texture
+        for (x, y, color) in self.pending_texture_updates.drain(..) {
+            let data_layout = ImageDataLayout {
+                offset: 0,
+                bytes_per_row: NonZeroU32::new(256),
+                rows_per_image: None,
+            };
+
+            self.queue.write_texture(
+                ImageCopyTexture {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: x, y: y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &color,
+                data_layout,
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         let view = frame
             .texture
@@ -209,5 +176,30 @@ impl PixelArtRenderer {
         self.queue.submit(Some(encoder.finish()));
 
         frame.present();
+    }
+
+    pub fn clear(&mut self, color: wgpu::Color) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear_encoder"),
+            });
+
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 }
