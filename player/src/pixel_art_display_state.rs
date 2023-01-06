@@ -72,16 +72,19 @@ impl PixelArtDisplayState {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_DST,
             label: None,
         };
         let texture = device.create_texture(&texture_desc);
-
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let surface_texture_format = *surface
+            .get_supported_formats(&adapter)
+            .first()
+            .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
 
         let scaling_renderer = ScalingRenderer::new(
             &device,
@@ -91,7 +94,7 @@ impl PixelArtDisplayState {
                 width: 2000,
                 height: 2000,
             },
-            texture_desc.format,
+            surface_texture_format,
             wgpu::Color::BLACK,
             wgpu::BlendState::REPLACE,
         );
