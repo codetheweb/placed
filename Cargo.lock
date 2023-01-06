@@ -1676,20 +1676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pixels"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5169d2d398c75596005313afae6b4b26cb14a22210f148a0183de95b45795a5"
-dependencies = [
- "bytemuck",
- "pollster",
- "raw-window-handle 0.5.0",
- "thiserror",
- "ultraviolet",
- "wgpu",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1703,7 +1689,6 @@ dependencies = [
  "bytemuck",
  "colors-transform",
  "game-loop",
- "pixels",
  "pollster",
  "ultraviolet",
  "wgpu",

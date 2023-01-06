@@ -1,14 +1,11 @@
 use std::num::NonZeroU32;
 
 use crate::renderers::{ScalingRenderer, SurfaceSize};
-use wgpu::{
-    Adapter, Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView,
-};
+use wgpu::{Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView};
 use winit::window::Window;
 
-pub struct PixelArtRenderer {
+pub struct PixelArtDisplayState {
     surface: Surface,
-    adapter: Adapter,
     device: Device,
     queue: Queue,
     texture: Texture,
@@ -19,7 +16,7 @@ pub struct PixelArtRenderer {
     pending_texture_updates: Vec<(u32, u32, [u8; 4])>,
 }
 
-impl PixelArtRenderer {
+impl PixelArtDisplayState {
     pub fn new(window: &Window) -> Self {
         pollster::block_on(Self::async_new(window))
     }
@@ -101,7 +98,6 @@ impl PixelArtRenderer {
 
         Self {
             surface,
-            adapter,
             device,
             queue,
             texture,
@@ -124,18 +120,18 @@ impl PixelArtRenderer {
             });
 
         // Update texture
-        for (x, y, color) in self.pending_texture_updates.drain(..) {
-            let data_layout = ImageDataLayout {
-                offset: 0,
-                bytes_per_row: NonZeroU32::new(256),
-                rows_per_image: None,
-            };
+        let data_layout = ImageDataLayout {
+            offset: 0,
+            bytes_per_row: NonZeroU32::new(256),
+            rows_per_image: None,
+        };
 
+        for (x, y, color) in self.pending_texture_updates.drain(..) {
             self.queue.write_texture(
                 ImageCopyTexture {
                     texture: &self.texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: x, y: y, z: 0 },
+                    origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &color,
@@ -153,26 +149,6 @@ impl PixelArtRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.scaling_renderer.render(&mut encoder, &view);
-
-        {
-            // let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            //     label: None,
-            //     color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-            //         attachment: &frame.view,
-            //         resolve_target: None,
-            //         ops: wgpu::Operations {
-            //             load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-            //             store: true,
-            //         },
-            //     }],
-            //     depth_stencil_attachment: None,
-            // });
-
-            // render_pass.set_pipeline(&self.pipeline);
-            // render_pass.set_bind_group(0, &self.bind_group, &[]);
-            // render_pass.draw(0..3, 0..1);
-        }
-
         self.queue.submit(Some(encoder.finish()));
 
         frame.present();
