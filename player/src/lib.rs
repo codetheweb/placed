@@ -49,6 +49,20 @@ impl<'a> Player<'a> {
     pub fn render(&mut self) {
         self.render_state.render();
     }
+
+    pub fn handle_input(&mut self, input: &WinitInputHelper) {
+        let scrolled = input.scroll_diff();
+
+        if scrolled != 0.0 {
+            self.render_state.apply_scale_diff(scrolled);
+        }
+
+        if input.mouse_held(0) {
+            let (x, y) = input.mouse_diff();
+            self.render_state
+                .apply_translate_diff(x / 100.0, -y / 100.0);
+        }
+    }
 }
 
 pub const FPS: usize = 60;
@@ -62,14 +76,13 @@ const HEIGHT: u32 = 2000;
 
 pub fn play(archive_path: String) -> i32 {
     let event_loop = EventLoop::new();
-    let input = WinitInputHelper::new();
+    let mut input = WinitInputHelper::new();
 
     let window = {
-        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
-        let scaled_size = LogicalSize::new(WIDTH as f64 * 3.0, HEIGHT as f64 * 3.0);
+        // todo: why is / 2 needed
+        let size = LogicalSize::new(WIDTH as f64 / 2.0, HEIGHT as f64 / 2.0);
         WindowBuilder::new()
             .with_title("Placed")
-            .with_inner_size(scaled_size)
             .with_min_inner_size(size)
             .build(&event_loop)
             .unwrap()
@@ -100,7 +113,11 @@ pub fn play(archive_path: String) -> i32 {
                 std::thread::sleep(Duration::from_secs_f64(dt));
             }
         },
-        |g, event| {
+        move |g, event| {
+            if input.update(event) {
+                g.game.handle_input(&input);
+            }
+
             match event {
                 Event::WindowEvent { event, .. } => {
                     match event {
@@ -114,7 +131,7 @@ pub fn play(archive_path: String) -> i32 {
                         _ => (),
                     }
                 }
-                _ => (),
+                _ => {}
             };
         },
     );

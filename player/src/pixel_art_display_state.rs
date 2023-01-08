@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 
 use crate::renderers::{ScalingRenderer, SurfaceSize};
+use ultraviolet::Mat4;
 use wgpu::{Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView};
 use winit::window::Window;
 
@@ -12,8 +13,12 @@ pub struct PixelArtDisplayState {
     texture_view: TextureView,
 
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
-    pub scaling_renderer: ScalingRenderer,
+    scaling_renderer: ScalingRenderer,
     pending_texture_updates: Vec<(u32, u32, [u8; 4])>,
+
+    current_scale_factor: f32,
+    current_x_offset: f32,
+    current_y_offset: f32,
 }
 
 impl PixelArtDisplayState {
@@ -107,6 +112,9 @@ impl PixelArtDisplayState {
             texture_view,
             scaling_renderer,
             pending_texture_updates: Vec::new(),
+            current_scale_factor: 1.0,
+            current_x_offset: 0.0,
+            current_y_offset: 0.0,
         }
     }
 
@@ -180,5 +188,31 @@ impl PixelArtDisplayState {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    pub fn apply_scale_diff(&mut self, scale_diff: f32) {
+        self.current_scale_factor = self.current_scale_factor + scale_diff;
+
+        self.update_transform_matrix();
+    }
+
+    pub fn apply_translate_diff(&mut self, x_diff: f32, y_diff: f32) {
+        self.current_x_offset = self.current_x_offset + x_diff;
+        self.current_y_offset = self.current_y_offset + y_diff;
+
+        self.update_transform_matrix();
+    }
+
+    fn update_transform_matrix(&mut self) {
+        let scale = Mat4::from_scale(self.current_scale_factor);
+        let translate = Mat4::from_translation(ultraviolet::Vec3::new(
+            self.current_x_offset,
+            self.current_y_offset,
+            0.0,
+        ));
+        let transform = scale * translate;
+
+        self.scaling_renderer
+            .update_transform_matrix(&self.queue, transform);
     }
 }
