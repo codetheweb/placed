@@ -1,12 +1,13 @@
 use std::num::NonZeroU32;
 
 use crate::renderers::{ScalingRenderer, SurfaceSize};
-use ultraviolet::Mat4;
+use ultraviolet::{Mat4, Vec3};
 use wgpu::{Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView};
 use winit::window::Window;
 
 pub struct PixelArtDisplayState {
     surface: Surface,
+    adapter: wgpu::Adapter,
     device: Device,
     queue: Queue,
     texture: Texture,
@@ -19,6 +20,7 @@ pub struct PixelArtDisplayState {
     current_scale_factor: f32,
     current_x_offset: f32,
     current_y_offset: f32,
+    current_size: (u32, u32),
 }
 
 impl PixelArtDisplayState {
@@ -106,6 +108,7 @@ impl PixelArtDisplayState {
 
         Self {
             surface,
+            adapter,
             device,
             queue,
             texture,
@@ -115,6 +118,7 @@ impl PixelArtDisplayState {
             current_scale_factor: 1.0,
             current_x_offset: 0.0,
             current_y_offset: 0.0,
+            current_size: (2000, 2000),
         }
     }
 
@@ -190,6 +194,29 @@ impl PixelArtDisplayState {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    pub fn resize_surface(&mut self, width: u32, height: u32) {
+        self.current_size = (width, height);
+
+        self.reconfigure_surface();
+        self.update_transform_matrix();
+    }
+
+    fn reconfigure_surface(&mut self) {
+        let (width, height) = self.current_size;
+
+        self.surface.configure(
+            &self.device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: self.surface.get_supported_formats(&self.adapter)[0],
+                width,
+                height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            },
+        );
+    }
+
     pub fn apply_scale_diff(&mut self, scale_diff: f32) {
         self.current_scale_factor = self.current_scale_factor + scale_diff;
 
@@ -204,13 +231,22 @@ impl PixelArtDisplayState {
     }
 
     fn update_transform_matrix(&mut self) {
+        let (screen_width, screen_height) = self.current_size;
+
+        let base_scale = Mat4::from_nonuniform_scale(Vec3 {
+            x: 2000.0 / screen_width as f32,
+            y: 2000.0 / screen_height as f32,
+            z: 0.0,
+        });
+
         let scale = Mat4::from_scale(self.current_scale_factor);
         let translate = Mat4::from_translation(ultraviolet::Vec3::new(
             self.current_x_offset,
             self.current_y_offset,
             0.0,
         ));
-        let transform = scale * translate;
+
+        let transform = translate * base_scale * scale;
 
         self.scaling_renderer
             .update_transform_matrix(&self.queue, transform);

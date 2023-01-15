@@ -198,12 +198,7 @@ impl ScalingRenderer {
         rpass.set_pipeline(&self.render_pipeline);
         rpass.set_bind_group(0, &self.bind_group, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        rpass.set_scissor_rect(
-            self.clip_rect.0,
-            self.clip_rect.1,
-            self.clip_rect.2,
-            self.clip_rect.3,
-        );
+        // todo: add back scissor region for better performance?
         rpass.draw(0..3, 0..1);
     }
 

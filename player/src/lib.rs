@@ -3,7 +3,7 @@ use std::{fs::File, time::Duration};
 use archive::PlacedArchiveReader;
 use game_loop::{game_loop, Time, TimeTrait};
 use winit::{
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalSize},
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::WindowBuilder,
@@ -62,6 +62,10 @@ impl<'a> Player<'a> {
             self.render_state
                 .apply_translate_diff(x / 100.0, -y / 100.0);
         }
+    }
+
+    pub fn resize(&mut self, size: PhysicalSize<u32>) {
+        self.render_state.resize_surface(size.width, size.height);
     }
 }
 
@@ -122,7 +126,7 @@ pub fn play(archive_path: String) -> i32 {
                 Event::WindowEvent { event, .. } => {
                     match event {
                         WindowEvent::Resized(physical_size) => {
-                            // g.game.resize(*physical_size);
+                            g.game.resize(*physical_size);
                         }
                         WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                             // new_inner_size is &&mut so we have to dereference it twice
