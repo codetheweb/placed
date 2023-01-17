@@ -1,8 +1,14 @@
 use std::num::NonZeroU32;
 
-use crate::renderers::{ScalingRenderer, SurfaceSize};
+use crate::{
+    color_buffer_cache::ColorBufferCache,
+    renderers::{ScalingRenderer, SurfaceSize},
+};
 use ultraviolet::{Mat4, Vec3};
-use wgpu::{Device, ImageCopyTexture, ImageDataLayout, Queue, Surface, Texture, TextureView};
+use wgpu::{
+    Device, ImageCopyBuffer, ImageCopyTexture, ImageDataLayout,
+    Queue, Surface, Texture, TextureView,
+};
 use winit::window::Window;
 
 pub struct PixelArtDisplayState {
@@ -21,6 +27,8 @@ pub struct PixelArtDisplayState {
     current_x_offset: f32,
     current_y_offset: f32,
     current_size: (u32, u32),
+
+    color_buffer_cache: ColorBufferCache,
 }
 
 impl PixelArtDisplayState {
@@ -119,6 +127,7 @@ impl PixelArtDisplayState {
             current_x_offset: 0.0,
             current_y_offset: 0.0,
             current_size: (2000, 2000),
+            color_buffer_cache: ColorBufferCache::new(),
         }
     }
 
@@ -142,15 +151,17 @@ impl PixelArtDisplayState {
         };
 
         for (x, y, color) in self.pending_texture_updates.drain(..) {
-            self.queue.write_texture(
+            encoder.copy_buffer_to_texture(
+                ImageCopyBuffer {
+                    buffer: self.color_buffer_cache.get(&color, &self.device),
+                    layout: data_layout,
+                },
                 ImageCopyTexture {
                     texture: &self.texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    origin: wgpu::Origin3d { x: x, y: y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &color,
-                data_layout,
                 wgpu::Extent3d {
                     width: 1,
                     height: 1,

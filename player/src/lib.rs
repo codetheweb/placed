@@ -1,4 +1,4 @@
-use std::{fs::File, time::Duration};
+use std::{fs::File, iter::Peekable, time::Duration};
 
 use archive::PlacedArchiveReader;
 use game_loop::{game_loop, Time, TimeTrait};
@@ -10,43 +10,47 @@ use winit::{
 };
 use winit_input_helper::WinitInputHelper;
 
+mod color_buffer_cache;
 mod pixel_art_display_state;
 mod renderers;
 
 struct Player<'a> {
-    rendered_up_to_ms: u32,
-    r: PlacedArchiveReader<'a, File>,
+    rendered_up_to: Duration,
+    r: Peekable<PlacedArchiveReader<'a, File>>,
     render_state: pixel_art_display_state::PixelArtDisplayState,
+    timescale_factor: f32,
 }
 
 impl<'a> Player<'a> {
     pub fn new(
         r: PlacedArchiveReader<'a, File>,
         render_state: pixel_art_display_state::PixelArtDisplayState,
+        timescale_factor: f32,
     ) -> Self {
         Self {
-            rendered_up_to_ms: 0,
-            r,
+            rendered_up_to: Duration::ZERO,
+            r: r.peekable(),
             render_state,
+            timescale_factor,
         }
     }
 
-    pub fn tick(&mut self) {
-        self.rendered_up_to_ms += 1000 * 60;
-    }
+    pub fn update(&mut self, dt: Duration) {
+        self.rendered_up_to = self.rendered_up_to + dt.mul_f32(self.timescale_factor);
 
-    pub fn draw(&mut self) {
-        for tile in self.r.next() {
-            if tile.ms_since_epoch > self.rendered_up_to_ms {
+        while let Some(tile) = self.r.peek() {
+            if tile.ms_since_epoch > self.rendered_up_to.as_millis() as u32 {
                 break;
             }
 
             self.render_state
                 .update_pixel(tile.x as u32, tile.y as u32, tile.color);
+
+            self.r.next();
         }
     }
 
-    pub fn render(&mut self) {
+    pub fn draw(&mut self) {
         self.render_state.render();
     }
 
@@ -78,7 +82,7 @@ const ONE_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const WIDTH: u32 = 2000;
 const HEIGHT: u32 = 2000;
 
-pub fn play(archive_path: String) -> i32 {
+pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
 
@@ -97,7 +101,7 @@ pub fn play(archive_path: String) -> i32 {
 
     let mut state = pixel_art_display_state::PixelArtDisplayState::new(&window);
     state.clear(wgpu::Color::WHITE);
-    let p = Player::new(reader, state);
+    let p = Player::new(reader, state, timescale_factor);
 
     game_loop(
         event_loop,
@@ -106,11 +110,12 @@ pub fn play(archive_path: String) -> i32 {
         FPS as u32,
         0.1,
         move |g| {
-            g.game.tick();
+            let dt = TIME_STEP - Duration::from_secs_f64(Time::now().sub(&g.current_instant()));
+
+            g.game.update(dt);
         },
         move |g| {
             g.game.draw();
-            g.game.render();
 
             let dt = TIME_STEP.as_secs_f64() - Time::now().sub(&g.current_instant());
             if dt > 0.0 {
@@ -123,18 +128,15 @@ pub fn play(archive_path: String) -> i32 {
             }
 
             match event {
-                Event::WindowEvent { event, .. } => {
-                    match event {
-                        WindowEvent::Resized(physical_size) => {
-                            g.game.resize(*physical_size);
-                        }
-                        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                            // new_inner_size is &&mut so we have to dereference it twice
-                            // g.game.resize(**new_inner_size);
-                        }
-                        _ => (),
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::Resized(physical_size) => {
+                        g.game.resize(*physical_size);
                     }
-                }
+                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                        g.game.resize(**new_inner_size);
+                    }
+                    _ => (),
+                },
                 _ => {}
             };
         },
