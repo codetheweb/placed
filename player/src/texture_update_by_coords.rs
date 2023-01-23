@@ -24,8 +24,8 @@ impl TextureUpdateByCoords {
             entry_point: "main",
         });
 
-        // todo: make parameter, pull struct size automatically
-        let MAX_SIZE = (size_of::<u32>() * 5) * 2000 * 2000;
+        // todo: pull struct size automatically
+        let MAX_SIZE = (size_of::<u32>() * 5) * MAX_WORKGROUP_DISPATCH_SIZE;
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
@@ -85,6 +85,7 @@ impl TextureUpdateByCoords {
         }
     }
 
+    /// Make sure to only pass one tile per position, as it's not guaranteed that the order of tiles will be preserved during rendering.
     pub fn update(
         &mut self,
         device: &wgpu::Device,

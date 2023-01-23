@@ -72,8 +72,6 @@ impl<'a> Player<'a> {
 
 pub const FPS: usize = 60;
 pub const TIME_STEP: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
-// Internally, the game advances at 60 fps
-const ONE_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 // todo: make dynamic
 const WIDTH: u32 = 2000;
@@ -107,11 +105,7 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
         FPS as u32,
         0.1,
         move |g| {
-            let dt = TIME_STEP
-                - Duration::from_secs_f64(Time::now().sub(&g.current_instant()))
-                    .clamp(Duration::ZERO, TIME_STEP);
-
-            g.game.update(dt);
+            g.game.update(TIME_STEP);
         },
         move |g| {
             g.game.draw();
