@@ -10,9 +10,9 @@ use winit::{
 };
 use winit_input_helper::WinitInputHelper;
 
-mod color_buffer_cache;
 mod pixel_art_display_state;
 mod renderers;
+mod texture_update_by_coords;
 
 struct Player<'a> {
     rendered_up_to: Duration,
@@ -38,15 +38,12 @@ impl<'a> Player<'a> {
     pub fn update(&mut self, dt: Duration) {
         self.rendered_up_to = self.rendered_up_to + dt.mul_f32(self.timescale_factor);
 
-        while let Some(tile) = self.r.peek() {
-            if tile.ms_since_epoch > self.rendered_up_to.as_millis() as u32 {
+        while let Some(next_tile) = self.r.peek() {
+            if next_tile.ms_since_epoch > self.rendered_up_to.as_millis() as u32 {
                 break;
             }
 
-            self.render_state
-                .update_pixel(tile.x as u32, tile.y as u32, tile.color);
-
-            self.r.next();
+            self.render_state.update_pixel(self.r.next().unwrap());
         }
     }
 
@@ -110,7 +107,9 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
         FPS as u32,
         0.1,
         move |g| {
-            let dt = TIME_STEP - Duration::from_secs_f64(Time::now().sub(&g.current_instant()));
+            let dt = TIME_STEP
+                - Duration::from_secs_f64(Time::now().sub(&g.current_instant()))
+                    .clamp(Duration::ZERO, TIME_STEP);
 
             g.game.update(dt);
         },

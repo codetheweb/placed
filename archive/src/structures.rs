@@ -35,6 +35,7 @@ pub struct DecodedTilePlacement {
     pub x: u16,
     pub y: u16,
     pub ms_since_epoch: u32,
+    /// rgba
     pub color: [u8; 4],
 }
 
@@ -56,6 +57,7 @@ pub struct ChunkDescription {
 pub struct Meta {
     pub canvas_size_changes: Vec<CanvasSizeChange>,
     pub last_pixel_placed_at_seconds_since_epoch: u32,
+    /// rgba
     pub color_id_to_tuple: HashMap<u8, [u8; 4]>,
     pub chunk_descs: Vec<ChunkDescription>,
 }
