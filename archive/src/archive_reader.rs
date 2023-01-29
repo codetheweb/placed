@@ -70,6 +70,27 @@ impl<'a, R: Read + Seek + 'a> PlacedArchiveReader<'a, R> {
     }
 }
 
+impl<'a, R: Read + Seek> Read for PlacedArchiveReader<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.current_tile_chunk_data {
+            Some(ref mut data) => {
+                if data.position() == data.get_ref().len() as u64 {
+                    match self.get_next_chunk_data() {
+                        Ok(_) => self.read(buf),
+                        Err(_) => Ok(0),
+                    }
+                } else {
+                    data.read(buf)
+                }
+            }
+            None => match self.get_next_chunk_data() {
+                Ok(_) => self.read(buf),
+                Err(_) => Ok(0),
+            },
+        }
+    }
+}
+
 impl<'a, R: Read + Seek> Iterator for PlacedArchiveReader<'a, R> {
     type Item = DecodedTilePlacement;
 
@@ -77,6 +98,7 @@ impl<'a, R: Read + Seek> Iterator for PlacedArchiveReader<'a, R> {
         match &mut self.current_tile_chunk_data {
             Some(ref mut data) => {
                 if data.position() == data.get_ref().len() as u64 {
+                    // todo: use Read trait from above instead of implementing this again
                     match self.get_next_chunk_data() {
                         Ok(_) => self.next(),
                         Err(_) => None,
