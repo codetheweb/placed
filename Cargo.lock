@@ -1689,6 +1689,7 @@ dependencies = [
  "bytemuck",
  "colors-transform",
  "game-loop",
+ "image",
  "pollster",
  "ultraviolet",
  "wgpu",

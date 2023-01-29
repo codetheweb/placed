@@ -1,5 +1,5 @@
 use bincode::{Decode, Encode};
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write};
 
 use crate::constants::BINCODE_CONFIG;
 
@@ -28,6 +28,10 @@ impl StoredTilePlacement {
         .unwrap();
 
         buf.len()
+    }
+
+    pub fn write_into(&self, w: &mut impl Write) {
+        bincode::encode_into_std_write(self, w, BINCODE_CONFIG).unwrap();
     }
 }
 

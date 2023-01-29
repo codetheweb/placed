@@ -68,7 +68,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(
       texture_out,
       vec2<i32>(i32(x), i32(y)),
-      vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, 0.0)
+      // vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, 0.0)
+      vec4<f32>(1f, 1f, 1f, 1f)
     );
 
     i++;
