@@ -1,14 +1,42 @@
 // todo: use https://docs.rs/crevice/latest/crevice/ for more ergonomic struct?
 struct CoordinateUpdate {
-  x: u32,
-  y: u32,
-  r: u32,
-  g: u32,
-  b: u32,
+  data: array<u32, 9>
 };
 
+struct Locals {
+  color_map: array<vec4<u32>, 256>
+};
+
+
 @group(0) @binding(0) var<storage, read> tile_updates : array<CoordinateUpdate>;
-@group(0) @binding(1) var texture_out : texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(1) var<uniform> r_locals: Locals;
+@group(0) @binding(2) var texture_out : texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<storage, write> current_ms_since_epoch: atomic<u32>;
+
+fn readU8(i: u32, current_offset: u32) -> u32 {
+	var ipos : u32 = current_offset / 4u;
+	var val_u32 : u32 = tile_updates[i].data[ipos];
+	var shift : u32 = 8u * (current_offset % 4u);
+	var val_u8 : u32 = (val_u32 >> shift) & 0xFFu;
+
+	return val_u8;
+}
+
+fn readU16(i: u32, current_offset: u32) -> u32 {
+  var first = readU8(i, current_offset);
+  var second = readU8(i, current_offset + 1u);
+  var value = first | (second << 8u);
+
+  return value;
+}
+
+fn readU32(i: u32, current_offset: u32) -> u32 {
+  var first = readU16(i, current_offset);
+  var second = readU16(i, current_offset + 2u);
+  var value = first | (second << 16u);
+
+  return value;
+}
 
 @compute
 // todo: what's the optimal workgroup size?
@@ -19,11 +47,30 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  let tile_update = tile_updates[id.x];
+  var i: i32 = 0;
+  var current_offset = 0u;
+  loop {
+    if i >= 4 {
+      break;
+    }
 
-  textureStore(
-    texture_out,
-    vec2<i32>(i32(tile_update.x), i32(tile_update.y)),
-    vec4<f32>(f32(tile_update.r) / 255.0, f32(tile_update.g) / 255.0, f32(tile_update.b) / 255.0, 1.0)
-  );
+    let x = readU16(id.x, current_offset);
+    current_offset += 2u;
+    let y = readU16(id.x, current_offset);
+    current_offset += 2u;
+    let color_index = readU8(id.x, current_offset);
+    current_offset += 3u;
+    let ms_since_epoch = readU32(id.x, current_offset);
+    current_offset += 4u;
+
+    let color = r_locals.color_map[color_index];
+
+    textureStore(
+      texture_out,
+      vec2<i32>(i32(x), i32(y)),
+      vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, 0.0)
+    );
+
+    i++;
+  }
 }

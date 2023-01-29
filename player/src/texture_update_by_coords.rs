@@ -1,6 +1,6 @@
-use std::{mem::size_of, num::NonZeroU32};
+use std::{cmp::min, mem::size_of, num::NonZeroU32};
 
-use archive::structures::DecodedTilePlacement;
+use archive::structures::{Meta, StoredTilePlacement};
 use wgpu::util::DeviceExt;
 
 pub struct TextureUpdateByCoords {
@@ -10,10 +10,8 @@ pub struct TextureUpdateByCoords {
     bind_group: wgpu::BindGroup,
 }
 
-const MAX_WORKGROUP_DISPATCH_SIZE: usize = 65535;
-
 impl TextureUpdateByCoords {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, meta: Meta) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/texture_update_by_coords.compute.wgsl");
         let module = device.create_shader_module(shader);
 
@@ -25,12 +23,30 @@ impl TextureUpdateByCoords {
         });
 
         // todo: pull struct size automatically
-        let MAX_SIZE = (size_of::<u32>() * 5) * MAX_WORKGROUP_DISPATCH_SIZE;
+        let MAX_SIZE = (size_of::<u32>() * 5)
+            * (device.limits().max_compute_workgroups_per_dimension as usize);
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
             contents: bytemuck::cast_slice(&vec![0; MAX_SIZE]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let mut r: Vec<[u32; 4]> = meta
+            .color_id_to_tuple
+            .into_values()
+            .map(|x| [x[0] as u32, x[1] as u32, x[2] as u32, x[3] as u32])
+            .collect();
+
+        // Pad to 256 color tuples
+        while r.len() < 256 {
+            r.push([0, 0, 0, 0]);
+        }
+
+        let locals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("texture_update_by_coords locals buffer"),
+            contents: bytemuck::cast_slice(&r),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         // todo: make size parameter
@@ -72,6 +88,10 @@ impl TextureUpdateByCoords {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: locals_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: wgpu::BindingResource::TextureView(&some_view),
                 },
             ],
@@ -90,31 +110,28 @@ impl TextureUpdateByCoords {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        tiles: Vec<DecodedTilePlacement>,
+        chunk: Vec<u8>,
     ) {
-        for chunked_tiles in tiles.chunks(MAX_WORKGROUP_DISPATCH_SIZE) {
+        let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
+
+        let limit = device.limits().max_compute_workgroups_per_dimension / 4;
+
+        let mut i = 0;
+        while i < num_of_tiles {
+            let current = &chunk[i..min(i + (limit as usize) + 1, chunk.len())];
+
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("texture_update_by_coords compute pass"),
                 });
                 cpass.set_pipeline(&self.compute_pipeline);
                 cpass.set_bind_group(0, &self.bind_group, &[]);
-                cpass.dispatch_workgroups(chunked_tiles.len() as u32, 1, 1);
-            }
-
-            let mut mapped_tiles: Vec<u32> = Vec::new();
-
-            for tile in chunked_tiles {
-                mapped_tiles.push(tile.x.into());
-                mapped_tiles.push(tile.y.into());
-                mapped_tiles.push(tile.color[0].into());
-                mapped_tiles.push(tile.color[1].into());
-                mapped_tiles.push(tile.color[2].into());
+                cpass.dispatch_workgroups(current.len() as u32, 1, 1);
             }
 
             let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
-                contents: bytemuck::cast_slice(&mapped_tiles),
+                contents: bytemuck::cast_slice(&current),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             });
 
@@ -123,8 +140,10 @@ impl TextureUpdateByCoords {
                 0,
                 &self.input_buffer,
                 0,
-                (mapped_tiles.len() * std::mem::size_of::<u32>()) as u64,
+                (current.len()) as u64,
             );
+
+            i = i + (device.limits().max_compute_workgroups_per_dimension) as usize + 1;
         }
     }
 }

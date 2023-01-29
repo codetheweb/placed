@@ -1,6 +1,10 @@
-use std::{fs::File, iter::Peekable, time::Duration};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    time::Duration,
+};
 
-use archive::PlacedArchiveReader;
+use archive::{structures::StoredTilePlacement, PlacedArchiveReader};
 use game_loop::{game_loop, Time, TimeTrait};
 use winit::{
     dpi::{LogicalSize, PhysicalSize},
@@ -16,7 +20,7 @@ mod texture_update_by_coords;
 
 struct Player<'a> {
     rendered_up_to: Duration,
-    r: Peekable<PlacedArchiveReader<'a, File>>,
+    r: BufReader<PlacedArchiveReader<'a, File>>,
     render_state: pixel_art_display_state::PixelArtDisplayState,
     timescale_factor: f32,
 }
@@ -29,22 +33,17 @@ impl<'a> Player<'a> {
     ) -> Self {
         Self {
             rendered_up_to: Duration::ZERO,
-            r: r.peekable(),
+            r: BufReader::new(r),
             render_state,
             timescale_factor,
         }
     }
 
     pub fn update(&mut self, dt: Duration) {
-        self.rendered_up_to = self.rendered_up_to + dt.mul_f32(self.timescale_factor);
+        let mut buf: Vec<u8> = vec![0u8; StoredTilePlacement::encoded_size() * 4096 * 10];
+        self.r.read_exact(buf.as_mut_slice()).unwrap();
 
-        while let Some(next_tile) = self.r.peek() {
-            if next_tile.ms_since_epoch > self.rendered_up_to.as_millis() as u32 {
-                break;
-            }
-
-            self.render_state.update_pixel(self.r.next().unwrap());
-        }
+        self.render_state.update(buf);
     }
 
     pub fn draw(&mut self) {
@@ -70,6 +69,7 @@ impl<'a> Player<'a> {
     }
 }
 
+// todo: add option to unlock fps?
 pub const FPS: usize = 60;
 pub const TIME_STEP: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
 
@@ -94,7 +94,8 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
     let file = File::open(archive_path).expect("Failed to open archive");
     let reader = PlacedArchiveReader::new(file).expect("Failed to create reader");
 
-    let mut state = pixel_art_display_state::PixelArtDisplayState::new(&window);
+    let mut state =
+        pixel_art_display_state::PixelArtDisplayState::new(&window, reader.meta.clone());
     state.clear(wgpu::Color::WHITE);
     let p = Player::new(reader, state, timescale_factor);
 
