@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use crate::constants::BINCODE_CONFIG;
 
 #[derive(Encode, Decode, PartialEq, Eq, Debug)]
+#[repr(C)]
 pub struct StoredTilePlacement {
     pub x: u16,
     pub y: u16,
-    pub ms_since_epoch: u32,
     pub color_index: u8,
+    pub ms_since_epoch: u32,
 }
 
 impl StoredTilePlacement {
