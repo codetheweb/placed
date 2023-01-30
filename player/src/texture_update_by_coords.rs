@@ -305,6 +305,18 @@ mod tests {
             use image::{ImageBuffer, Rgba};
             let buffer =
                 ImageBuffer::<Rgba<u8>, _>::from_raw(texture_size, texture_size, data).unwrap();
+
+            // Check generated texture
+            for x in 0..texture_size {
+                for y in 0..texture_size {
+                    if y % 2 == 0 {
+                        assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                    } else {
+                        assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                    }
+                }
+            }
+
             buffer.save("image.png").unwrap();
         }
         output_buffer.unmap();
