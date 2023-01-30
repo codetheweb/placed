@@ -1,6 +1,8 @@
 // todo: use https://docs.rs/crevice/latest/crevice/ for more ergonomic struct?
+let SIZE_OF_COORDINATE_UPDATE = 9u;
+
 struct CoordinateUpdate {
-  data: array<u32, 9>
+  data: array<u32, SIZE_OF_COORDINATE_UPDATE>
 };
 
 struct Locals {
@@ -47,30 +49,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  var i = 0;
-  var current_offset = 0u;
-  loop {
-    if i > 3 {
-      break;
-    }
-
-    let x = readU16(id.x, current_offset);
-    current_offset += 2u;
-    let y = readU16(id.x, current_offset);
-    current_offset += 2u;
-    let color_index = readU8(id.x, current_offset);
-    current_offset += 1u;
-    let ms_since_epoch = readU32(id.x, current_offset);
-    current_offset += 4u;
-
-    let color = r_locals.color_map[color_index];
-
-    textureStore(
-      texture_out,
-      vec2<i32>(i32(x), i32(y)),
-      vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, f32(color.w) / 255.0)
-    );
-
-    i++;
+  if (id.y > 3u) {
+    return;
   }
+
+  var current_offset = id.y * SIZE_OF_COORDINATE_UPDATE;
+
+  let x = readU16(id.x, current_offset);
+  current_offset += 2u;
+  let y = readU16(id.x, current_offset);
+  current_offset += 2u;
+  let color_index = readU8(id.x, current_offset);
+  current_offset += 1u;
+  let ms_since_epoch = readU32(id.x, current_offset);
+  current_offset += 4u;
+
+  let color = r_locals.color_map[color_index];
+
+  textureStore(
+    texture_out,
+    vec2<i32>(i32(x), i32(y)),
+    vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, f32(color.w) / 255.0)
+  );
 }

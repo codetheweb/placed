@@ -134,6 +134,14 @@ impl TextureUpdateByCoords {
             let current = &chunk[(current_tile_offset * StoredTilePlacement::encoded_size())
                 ..(next_tile_offset * StoredTilePlacement::encoded_size())];
 
+            // Pad
+            let mut current = current.to_vec();
+            while current.len()
+                < (num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size()
+            {
+                current.push(0);
+            }
+
             let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&current),
@@ -154,11 +162,14 @@ impl TextureUpdateByCoords {
                 });
                 cpass.set_pipeline(&self.compute_pipeline);
                 cpass.set_bind_group(0, &self.bind_group, &[]);
-                cpass.dispatch_workgroups(
-                    (next_tile_offset - current_tile_offset) as u32 / num_of_tiles_per_workgroup,
-                    1,
-                    1,
-                );
+
+                let num_of_workgroups = f32::ceil(
+                    (next_tile_offset - current_tile_offset) as f32
+                        / num_of_tiles_per_workgroup as f32,
+                ) as u32;
+                let num_of_tiles_in_current_chunk = (next_tile_offset - current_tile_offset) as u32;
+
+                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_in_current_chunk, 1);
             }
 
             current_tile_offset = next_tile_offset;
@@ -385,6 +396,51 @@ mod tests {
         for x in 0..texture_size {
             for y in 0..texture_size {
                 assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+            }
+        }
+    }
+
+    #[test]
+    fn single_pixel() {
+        let mut color_id_to_tuple = HashMap::new();
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        StoredTilePlacement {
+            x: 63,
+            y: 63,
+            color_index: 0,
+            ms_since_epoch: 0,
+        }
+        .write_into(&mut data);
+
+        let buffer =
+            TestHelpers::render_to_buffer("single_pixel", meta, |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            });
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x == 63 && y == 63 {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
             }
         }
     }
