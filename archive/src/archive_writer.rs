@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     io::{Read, Seek, SeekFrom, Write},
 };
 
@@ -39,7 +39,7 @@ impl Ord for IntermediateTilePlacement {
 
 pub struct PlacedArchiveWriter<'a, W: Write> {
     mla: ArchiveWriter<'a, W>,
-    color_tuple_to_id: HashMap<[u8; 4], u8>,
+    color_tuple_to_id: BTreeMap<[u8; 4], u8>,
     tile_placements: Vec<IntermediateTilePlacement>,
 }
 
@@ -52,7 +52,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
 
         PlacedArchiveWriter {
             mla,
-            color_tuple_to_id: HashMap::new(),
+            color_tuple_to_id: BTreeMap::new(),
             tile_placements: Vec::new(),
         }
     }
@@ -136,7 +136,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
             chunk_descs,
             // todo
             last_pixel_placed_at_seconds_since_epoch: 0,
-            color_id_to_tuple: HashMap::from_iter(
+            color_id_to_tuple: BTreeMap::from_iter(
                 self.color_tuple_to_id.iter().map(|(k, v)| (*v, *k)),
             ),
         };

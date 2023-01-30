@@ -1,5 +1,5 @@
 use bincode::{Decode, Encode};
-use std::{collections::HashMap, io::Write};
+use std::{collections::BTreeMap, io::Write};
 
 use crate::constants::BINCODE_CONFIG;
 
@@ -63,7 +63,7 @@ pub struct Meta {
     pub canvas_size_changes: Vec<CanvasSizeChange>,
     pub last_pixel_placed_at_seconds_since_epoch: u32,
     /// rgba
-    pub color_id_to_tuple: HashMap<u8, [u8; 4]>,
+    pub color_id_to_tuple: BTreeMap<u8, [u8; 4]>,
     pub chunk_descs: Vec<ChunkDescription>,
 }
 
