@@ -249,7 +249,7 @@ mod tests {
             )
             .unwrap();
 
-            env_logger::init();
+            env_logger::try_init().ok();
 
             if log_enabled!(Level::Debug) {
                 buffer.save(format!("{}.png", test_name)).unwrap();
@@ -338,6 +338,53 @@ mod tests {
                 } else {
                     assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn red_square() {
+        let mut color_id_to_tuple = HashMap::new();
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        // Fill with red
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let tile = StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 0,
+                    ms_since_epoch: 0,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        let buffer =
+            TestHelpers::render_to_buffer("red_square", meta, |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            });
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
             }
         }
     }
