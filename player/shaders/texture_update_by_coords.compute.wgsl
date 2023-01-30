@@ -47,10 +47,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  var i: i32 = 0;
+  var i = 0;
   var current_offset = 0u;
   loop {
-    if i >= 4 {
+    if i > 3 {
       break;
     }
 
@@ -59,7 +59,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let y = readU16(id.x, current_offset);
     current_offset += 2u;
     let color_index = readU8(id.x, current_offset);
-    current_offset += 3u;
+    current_offset += 1u;
     let ms_since_epoch = readU32(id.x, current_offset);
     current_offset += 4u;
 
@@ -69,7 +69,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       texture_out,
       vec2<i32>(i32(x), i32(y)),
       // vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, 0.0)
-      vec4<f32>(1f, 1f, 1f, 1f)
+      vec4<f32>(0f, 0f, 0f, 1f)
     );
 
     i++;

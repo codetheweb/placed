@@ -119,22 +119,20 @@ impl TextureUpdateByCoords {
         encoder: &mut wgpu::CommandEncoder,
         chunk: Vec<u8>,
     ) {
+        let num_of_tiles_per_workgroup = 4;
+        let max_num_of_tiles_per_chunk =
+            device.limits().max_compute_workgroups_per_dimension * num_of_tiles_per_workgroup;
+
         let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
 
-        let limit = device.limits().max_compute_workgroups_per_dimension / 4;
-
-        let mut i = 0;
-        while i < num_of_tiles {
-            let current = &chunk[i..min(i + (limit as usize) + 1, chunk.len())];
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("texture_update_by_coords compute pass"),
-                });
-                cpass.set_pipeline(&self.compute_pipeline);
-                cpass.set_bind_group(0, &self.bind_group, &[]);
-                cpass.dispatch_workgroups(current.len() as u32, 1, 1);
-            }
+        let mut current_tile_offset = 0;
+        while current_tile_offset < num_of_tiles {
+            let next_tile_offset = min(
+                current_tile_offset + (max_num_of_tiles_per_chunk as usize),
+                num_of_tiles,
+            );
+            let current = &chunk[(current_tile_offset * StoredTilePlacement::encoded_size())
+                ..(next_tile_offset * StoredTilePlacement::encoded_size())];
 
             let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -150,7 +148,20 @@ impl TextureUpdateByCoords {
                 (current.len()) as u64,
             );
 
-            i = i + (device.limits().max_compute_workgroups_per_dimension) as usize + 1;
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("texture_update_by_coords compute pass"),
+                });
+                cpass.set_pipeline(&self.compute_pipeline);
+                cpass.set_bind_group(0, &self.bind_group, &[]);
+                cpass.dispatch_workgroups(
+                    (next_tile_offset - current_tile_offset) as u32 / num_of_tiles_per_workgroup,
+                    1,
+                    1,
+                );
+            }
+
+            current_tile_offset = next_tile_offset;
         }
     }
 }
@@ -198,7 +209,7 @@ mod tests {
     #[test]
     fn smoke() {
         let mut color_id_to_tuple = HashMap::new();
-        color_id_to_tuple.insert(0, [0, 0, 0, 1]);
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
 
         let texture_size: u32 = 64;
 
@@ -215,9 +226,13 @@ mod tests {
 
         let mut data: Vec<u8> = Vec::new();
 
-        // Fill with black
+        // Every other row with black
         for x in 0..texture_size {
             for y in 0..texture_size {
+                if y % 2 == 0 {
+                    continue;
+                }
+
                 let tile = StoredTilePlacement {
                     x: x as u16,
                     y: y as u16,
@@ -290,7 +305,6 @@ mod tests {
             use image::{ImageBuffer, Rgba};
             let buffer =
                 ImageBuffer::<Rgba<u8>, _>::from_raw(texture_size, texture_size, data).unwrap();
-            println!("buffer: {:?}", buffer);
             buffer.save("image.png").unwrap();
         }
         output_buffer.unmap();
