@@ -1,4 +1,4 @@
-use std::{cmp::min, mem::size_of, num::NonZeroU32};
+use std::{cmp::min, mem::size_of, num::NonZeroU32, vec};
 
 use archive::structures::{Meta, StoredTilePlacement};
 use wgpu::util::DeviceExt;
@@ -46,13 +46,19 @@ impl TextureUpdateByCoords {
             r.push([0, 0, 0, 0]);
         }
 
+        let size = meta.get_largest_canvas_size().unwrap();
+
+        let mut r = r.into_iter().flatten().collect::<Vec<u32>>();
+        // Padding for alignment
+        r.append(&mut vec![0; 16]);
+        r.append(&mut vec![size.width.into(), size.height.into()]);
+
         let locals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords locals buffer"),
             contents: bytemuck::cast_slice(&r),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let size = meta.get_largest_canvas_size().unwrap();
         let texture_extent = wgpu::Extent3d {
             width: size.width.into(),
             height: size.height.into(),
@@ -82,6 +88,15 @@ impl TextureUpdateByCoords {
             ..Default::default()
         });
 
+        let z = vec![0; size.width as usize * size.height as usize];
+
+        let last_timestamp_for_tile =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("texture_update_by_coords last timestamp buffer"),
+                contents: bytemuck::cast_slice(&z),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
         let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -98,6 +113,10 @@ impl TextureUpdateByCoords {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&some_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: last_timestamp_for_tile.as_entire_binding(),
                 },
             ],
         });
@@ -499,4 +518,70 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn discards_earlier_timestamps() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x % 2 == 0 {
+                    StoredTilePlacement {
+                        x: x as u16,
+                        y: y as u16,
+                        color_index: 0,
+                        ms_since_epoch: 1,
+                    }
+                    .write_into(&mut data);
+                }
+
+                StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 1,
+                    ms_since_epoch: 0,
+                }
+                .write_into(&mut data);
+            }
+        }
+
+        let buffer = TestHelpers::render_to_buffer(
+            "discards_earlier_timestamp",
+            meta,
+            |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x % 2 == 0 {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+                }
+            }
+        }
+    }
 }
+
+// todo: add test for odd number of pixels
+// todo: add test for race condition when chunking is necessary

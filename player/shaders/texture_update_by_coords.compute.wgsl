@@ -1,19 +1,20 @@
-// todo: use https://docs.rs/crevice/latest/crevice/ for more ergonomic struct?
 let SIZE_OF_COORDINATE_UPDATE = 9u;
 
 struct CoordinateUpdate {
   data: array<u32, SIZE_OF_COORDINATE_UPDATE>
 };
 
+// todo: use https://docs.rs/crevice/latest/crevice/ for more ergonomic struct?
 struct Locals {
-  color_map: array<vec4<u32>, 256>
+  color_map: array<vec4<u32>, 256>,
+  width: u32,
+  height: u32,
 };
 
-
 @group(0) @binding(0) var<storage, read> tile_updates : array<CoordinateUpdate>;
-@group(0) @binding(1) var<uniform> r_locals: Locals;
+@group(0) @binding(1) var<uniform> r_locals : Locals;
 @group(0) @binding(2) var texture_out : texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(3) var<storage, write> current_ms_since_epoch: atomic<u32>;
+@group(0) @binding(3) var<storage, read_write> last_timestamp_for_tile : array<atomic<u32>>;
 
 fn readU8(i: u32, current_offset: u32) -> u32 {
 	var ipos : u32 = current_offset / 4u;
@@ -65,6 +66,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   current_offset += 4u;
 
   let color = r_locals.color_map[color_index];
+
+  let previous_timestamp_value = atomicMax(&last_timestamp_for_tile[x + y * r_locals.width], ms_since_epoch);
+  if (previous_timestamp_value > ms_since_epoch) {
+    return;
+  }
 
   textureStore(
     texture_out,
