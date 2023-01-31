@@ -156,7 +156,8 @@ impl TextureUpdateByCoords {
             // Pad
             let mut current = current.to_vec();
             while current.len()
-                < (num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size()
+                % ((num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size())
+                != 0
             {
                 current.push(0);
             }
@@ -581,7 +582,56 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn odd_number_of_tiles() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for i in 0..7 {
+            StoredTilePlacement {
+                x: i as u16,
+                y: i as u16,
+                color_index: 0,
+                ms_since_epoch: 0,
+            }
+            .write_into(&mut data);
+        }
+
+        let buffer = TestHelpers::render_to_buffer(
+            "odd_number_of_tiles",
+            meta,
+            |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x < 7 && y < 7 && x == y {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+    }
 }
 
-// todo: add test for odd number of pixels
 // todo: add test for race condition when chunking is necessary
