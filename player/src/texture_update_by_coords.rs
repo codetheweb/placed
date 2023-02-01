@@ -159,7 +159,12 @@ impl TextureUpdateByCoords {
                 % ((num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size())
                 != 0
             {
-                current.push(0);
+                StoredTilePlacement {
+                    x: 0,
+                    y: 0,
+                    color_index: 255,
+                    ms_since_epoch: 0,
+                }.write_into(&mut current);
             }
 
             let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -187,9 +192,8 @@ impl TextureUpdateByCoords {
                     (next_tile_offset - current_tile_offset) as f32
                         / num_of_tiles_per_workgroup as f32,
                 ) as u32;
-                let num_of_tiles_in_current_chunk = (next_tile_offset - current_tile_offset) as u32;
 
-                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_in_current_chunk, 1);
+                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_per_workgroup, 1);
             }
 
             current_tile_offset = next_tile_offset;
