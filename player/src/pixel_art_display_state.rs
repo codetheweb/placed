@@ -32,9 +32,9 @@ impl PixelArtDisplayState {
     }
 
     async fn async_new(window: &Window, meta: Meta) -> Self {
-        let instance = Instance::new(wgpu::Backends::all());
+        let instance = Instance::new(wgpu::InstanceDescriptor::default());
 
-        let surface = unsafe { instance.create_surface(&window) };
+        let surface = unsafe { instance.create_surface(&window).unwrap() };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -58,7 +58,8 @@ impl PixelArtDisplayState {
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface.get_supported_formats(&adapter)[0],
+            view_formats: surface.get_capabilities(&adapter).formats,
+            format: surface.get_capabilities(&adapter).formats[0],
             width: 2000,
             height: 2000,
             present_mode: wgpu::PresentMode::Fifo,
@@ -73,7 +74,8 @@ impl PixelArtDisplayState {
         };
 
         let surface_texture_format = *surface
-            .get_supported_formats(&adapter)
+            .get_capabilities(&adapter)
+            .formats
             .first()
             .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
 
@@ -122,15 +124,17 @@ impl PixelArtDisplayState {
 
         let buf = take(&mut self.pending_tile_updates);
 
-        self.compute_renderer
-            .update(&self.device, &mut encoder, buf);
+        let encoders = self
+            .compute_renderer
+            .update(&self.device, &mut self.queue, buf);
 
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.scaling_renderer.render(&mut encoder, &view);
-        self.queue.submit(Some(encoder.finish()));
+        // self.queue.submit(Some(encoder.finish()));
+        // self.queue.submit(encoders.into_iter().map(|e| e.finish()).chain(std::iter::once(encoder.finish())));
 
         frame.present();
     }
@@ -174,9 +178,10 @@ impl PixelArtDisplayState {
             &self.device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.surface.get_supported_formats(&self.adapter)[0],
-                width,
-                height,
+                view_formats: self.surface.get_capabilities(&self.adapter).formats,
+                format: self.surface.get_capabilities(&self.adapter).formats[0],
+                width: 2000,
+                height: 2000,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
