@@ -159,9 +159,9 @@ impl TextureUpdateByCoords {
         &mut self,
         device: &wgpu::Device,
         // encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
+        // queue: &wgpu::Queue,
         chunk: Vec<u8>,
-    ) {
+    ) -> Vec<wgpu::CommandEncoder> {
         // self.staging_belt.recall();
         // let mut staging_belt = wgpu::util::StagingBelt::new(1024 * 1024);
 
@@ -170,7 +170,7 @@ impl TextureUpdateByCoords {
 
         let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
 
-        // let mut encoders = Vec::new();
+        let mut encoders = Vec::new();
 
         let mut current_tile_offset = 0;
         while current_tile_offset < num_of_tiles {
@@ -202,19 +202,19 @@ impl TextureUpdateByCoords {
                 .write_into(&mut current);
             }
 
-            // {
-            //     let mut b = self.staging_belt.write_buffer(
-            //         &mut encoder,
-            //         &self.input_buffer,
-            //         0,
-            //         NonZeroU64::new(current.len() as u64).unwrap(),
-            //         device,
-            //     );
-            //     b.copy_from_slice(&current);
-            // }
-            //     self.staging_belt.finish();
+            {
+                let mut b = self.staging_belt.write_buffer(
+                    &mut encoder,
+                    &self.input_buffer,
+                    0,
+                    NonZeroU64::new(current.len() as u64).unwrap(),
+                    device,
+                );
+                b.copy_from_slice(&current);
+            }
+                self.staging_belt.finish();
 
-            queue.write_buffer(&self.input_buffer, 0, &current);
+            // queue.write_buffer(&self.input_buffer, 0, &current);
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -233,18 +233,18 @@ impl TextureUpdateByCoords {
 
             current_tile_offset = next_tile_offset;
 
-            // encoders.push(encoder);
-            queue.submit(Some(encoder.finish()));
+            encoders.push(encoder);
+            // queue.submit(Some(encoder.finish()));
 
-            let (tx, rx) = mpsc::channel();
-            queue.on_submitted_work_done(move || {
-                tx.send(0).unwrap();
-            });
-            device.poll(wgpu::Maintain::Wait);
-            rx.recv().unwrap();
+            // let (tx, rx) = mpsc::channel();
+            // queue.on_submitted_work_done(move || {
+            //     tx.send(0).unwrap();
+            // });
+            // device.poll(wgpu::Maintain::Wait);
+            // rx.recv().unwrap();
         }
 
-        // return encoders
+        return encoders
     }
 }
 
@@ -253,7 +253,7 @@ mod tests {
     use archive::structures::{CanvasSizeChange, Meta, StoredTilePlacement};
     use image::{ImageBuffer, Rgba};
     use log::{log_enabled, Level};
-    use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc};
+    use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc, path::Path};
     use wgpu::Device;
 
     use super::TextureUpdateByCoords;
@@ -267,7 +267,7 @@ mod tests {
             callback: F,
         ) -> ImageBuffer<Rgba<u8>, Vec<u8>>
         where
-            F: FnOnce(&Device, &mut wgpu::Queue, &mut TextureUpdateByCoords),
+            F: FnOnce(&Device, &mut TextureUpdateByCoords) -> Vec<wgpu::CommandEncoder>,
         {
             let (device, mut queue) = Self::get_device();
 
@@ -275,7 +275,11 @@ mod tests {
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
             let mut controller = TextureUpdateByCoords::new(&device, meta.clone());
-            callback(&device, &mut queue, &mut controller);
+            let encoders = callback(&device, &mut controller);
+
+            for encoder in encoders {
+                queue.submit(Some(encoder.finish()));
+            }
 
             let u32_size = std::mem::size_of::<u32>() as u32;
 
@@ -409,8 +413,8 @@ mod tests {
         }
 
         let buffer =
-            TestHelpers::render_to_buffer("black_rows", meta, |device, encoder, controller| {
-                controller.update(device, encoder, data);
+            TestHelpers::render_to_buffer("black_rows", meta, |device, controller| {
+                controller.update(device, data)
             });
 
         // Check generated texture
@@ -730,7 +734,7 @@ mod tests {
         let buffer = TestHelpers::render_to_buffer(
             "multiple_compute_passes",
             meta,
-            |device, encoder, controller| controller.update(device, encoder, data),
+            |device, controller| controller.update(device, data),
         );
 
         // Check generated texture

@@ -126,7 +126,7 @@ impl PixelArtDisplayState {
 
         let encoders = self
             .compute_renderer
-            .update(&self.device, &mut self.queue, buf);
+            .update(&self.device, buf);
 
         let view = frame
             .texture
