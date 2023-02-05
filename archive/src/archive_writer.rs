@@ -73,7 +73,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
     }
 
     pub fn finalize(&mut self) {
-        self.tile_placements.sort_unstable();
+        self.tile_placements.sort();
 
         let first_tile_placed_at = self.tile_placements.first().unwrap().placed_at;
         let num_of_tiles_in_chunk = self.tile_placements.len() as u32 / NUM_CHUNKS;
