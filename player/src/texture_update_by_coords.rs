@@ -50,8 +50,8 @@ impl TextureUpdateByCoords {
 
         let mut r = r.into_iter().flatten().collect::<Vec<u32>>();
         // Padding for alignment
-        r.append(&mut vec![0; 16]);
         r.append(&mut vec![size.width.into(), size.height.into()]);
+        r.append(&mut vec![0; 2]);
 
         let locals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords locals buffer"),
