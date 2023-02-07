@@ -1,4 +1,9 @@
-use std::{cmp::min, mem::size_of, num::NonZeroU32, vec};
+use std::{
+    cmp::min,
+    mem::size_of,
+    num::{NonZeroU32, NonZeroU64},
+    vec,
+};
 
 use archive::structures::{Meta, StoredTilePlacement};
 use wgpu::util::DeviceExt;
@@ -14,6 +19,7 @@ pub struct TextureUpdateByCoords {
     update_texture_pipeline: wgpu::ComputePipeline,
     update_texture_bind_group: wgpu::BindGroup,
     last_index_for_tile: wgpu::Buffer,
+    staging_belt: wgpu::util::StagingBelt,
 }
 
 // todo: add note about assuming sorted input
@@ -175,6 +181,8 @@ impl TextureUpdateByCoords {
             update_texture_bind_group,
             zeros_buffer,
             last_index_for_tile,
+            // todo: use correct chunk size
+            staging_belt: wgpu::util::StagingBelt::new(1024),
         }
     }
 
@@ -193,6 +201,7 @@ impl TextureUpdateByCoords {
             0,
             self.zeros_buffer.size(),
         );
+        self.staging_belt.recall();
 
         let num_of_tiles_per_workgroup = 4;
         let max_num_of_tiles_per_chunk =
@@ -224,19 +233,18 @@ impl TextureUpdateByCoords {
                 .write_into(&mut current);
             }
 
-            let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&current),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
+            {
+                let mut s = self.staging_belt.write_buffer(
+                    encoder,
+                    &self.input_buffer,
+                    0,
+                    NonZeroU64::new(current.len() as u64).unwrap(),
+                    device,
+                );
+                s.copy_from_slice(&current);
+            }
 
-            encoder.copy_buffer_to_buffer(
-                &staging_buffer,
-                0,
-                &self.input_buffer,
-                0,
-                (current.len()) as u64,
-            );
+            self.staging_belt.finish();
 
             let num_of_workgroups = f32::ceil(
                 (next_tile_offset - current_tile_offset) as f32 / num_of_tiles_per_workgroup as f32,
