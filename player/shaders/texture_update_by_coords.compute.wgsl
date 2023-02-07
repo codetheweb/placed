@@ -4,6 +4,13 @@ struct FourTileUpdate {
   data: array<u32, SIZE_OF_COORDINATE_UPDATE_BYTES>
 };
 
+struct DecodedTileUpdate {
+  x: u32,
+  y: u32,
+  color_index: u32,
+  ms_since_epoch: u32,
+};
+
 // todo: use https://docs.rs/crevice/latest/crevice/ for more ergonomic struct?
 struct Locals {
   color_map: array<vec4<u32>, 256>,
@@ -15,6 +22,7 @@ struct Locals {
 @group(0) @binding(1) var<uniform> r_locals : Locals;
 @group(0) @binding(2) var texture_out : texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read_write> last_timestamp_for_tile : array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> last_index_for_tile : array<atomic<u32>>;
 
 fn readU8(i: u32, current_offset: u32) -> u32 {
 	var ipos : u32 = current_offset / 4u;
@@ -41,11 +49,26 @@ fn readU32(i: u32, current_offset: u32) -> u32 {
   return value;
 }
 
+fn readTile(four_tile_offset: u32, offset_in_four_tiles: u32) -> DecodedTileUpdate {
+  var current_offset = offset_in_four_tiles * SIZE_OF_COORDINATE_UPDATE_BYTES;
+
+  var tile: DecodedTileUpdate;
+
+  tile.x = readU16(four_tile_offset, current_offset);
+  current_offset += 2u;
+  tile.y = readU16(four_tile_offset, current_offset);
+  current_offset += 2u;
+  tile.color_index = readU8(four_tile_offset, current_offset);
+  current_offset += 1u;
+  tile.ms_since_epoch = readU32(four_tile_offset, current_offset);
+  current_offset += 4u;
+
+  return tile;
+}
+
 @compute
-// todo: what's the optimal workgroup size?
-// I think it's 1?
 @workgroup_size(1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= arrayLength(&tile_updates)) {
     return;
   }
@@ -54,34 +77,54 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  var current_offset = id.y * SIZE_OF_COORDINATE_UPDATE_BYTES;
+  let tile = readTile(id.x, id.y);
 
-  let x = readU16(id.x, current_offset);
-  current_offset += 2u;
-  let y = readU16(id.x, current_offset);
-  current_offset += 2u;
-  let color_index = readU8(id.x, current_offset);
-  current_offset += 1u;
-  let ms_since_epoch = readU32(id.x, current_offset);
-  current_offset += 4u;
-
-  if (color_index == 255u) {
+  if (tile.color_index == 255u) {
     // This update is just padding
     return;
   }
 
-  let color = r_locals.color_map[color_index];
+  atomicMax(&last_timestamp_for_tile[tile.x + tile.y * r_locals.width], tile.ms_since_epoch);
 
-  // If we don't put a barrier here, we might not have the latest value for the atomic
-  storageBarrier();
-  let previous_timestamp_value = atomicMax(&last_timestamp_for_tile[x + y * r_locals.width], ms_since_epoch);
-  if (previous_timestamp_value > ms_since_epoch) {
+  let current_data_index = (id.x * 3u) + id.y;
+  atomicMax(&last_index_for_tile[tile.x + tile.y * r_locals.width], current_data_index);
+}
+
+@compute
+@workgroup_size(1)
+fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= arrayLength(&tile_updates)) {
     return;
   }
 
+  if (id.y > 3u) {
+    return;
+  }
+
+  let tile = readTile(id.x, id.y);
+
+  if (tile.color_index == 255u) {
+    // This update is just padding
+    return;
+  }
+
+  let max_timestamp_for_tile = atomicLoad(&last_timestamp_for_tile[tile.x + tile.y * r_locals.width]);
+  if (max_timestamp_for_tile != tile.ms_since_epoch) {
+    return;
+  }
+
+  let current_data_index = (id.x * 3u) + id.y;
+  let max_data_index_for_tile = atomicLoad(&last_index_for_tile[tile.x + tile.y * r_locals.width]);
+
+  if (max_data_index_for_tile != current_data_index) {
+    return;
+  }
+
+  let color = r_locals.color_map[tile.color_index];
+
   textureStore(
     texture_out,
-    vec2<i32>(i32(x), i32(y)),
+    vec2<i32>(i32(tile.x), i32(tile.y)),
     vec4<f32>(f32(color.x) / 255.0, f32(color.y) / 255.0, f32(color.z) / 255.0, f32(color.w) / 255.0)
   );
 }
