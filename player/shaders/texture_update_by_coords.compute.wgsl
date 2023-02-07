@@ -1,11 +1,6 @@
-const SIZE_OF_COORDINATE_UPDATE_BYTES = 9u;
-const NUM_COORDINATE_UPDATES_PER_TILE = 4u;
-
-// https://gpuweb.github.io/gpuweb/#dom-supported-limits-maxcomputeworkgroupstoragesize
-const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION = 65535u;
+let SIZE_OF_COORDINATE_UPDATE_BYTES = 9u;
 
 struct FourTileUpdate {
-  // (u32 = 4 bytes)
   data: array<u32, SIZE_OF_COORDINATE_UPDATE_BYTES>
 };
 
@@ -47,15 +42,11 @@ fn readU32(i: u32, current_offset: u32) -> u32 {
 }
 
 @compute
+// todo: what's the optimal workgroup size?
+// I think it's 1?
 @workgroup_size(1)
-// id.x: 0-MAX_COMPUTE_WORKGROUPS_PER_DIMENSION
-// id.z: 0-MAX_COMPUTE_WORKGROUPS_PER_DIMENSION
-// id.x * id.z: index of FourTileUpdate within main tile_updates array
-// id.y: 0-4, tile index within the FourTileUpdate
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let data_index = id.x;// + (id.z * MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-
-  if (data_index >= arrayLength(&tile_updates)) {
+  if (id.x >= arrayLength(&tile_updates)) {
     return;
   }
 
@@ -63,23 +54,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  var offset_in_struct = id.y * SIZE_OF_COORDINATE_UPDATE_BYTES;
+  var current_offset = id.y * SIZE_OF_COORDINATE_UPDATE_BYTES;
 
-  let x = readU16(data_index, offset_in_struct);
-  offset_in_struct += 2u;
-  let y = readU16(data_index, offset_in_struct);
-  offset_in_struct += 2u;
-  let color_index = readU8(data_index, offset_in_struct);
-  offset_in_struct += 1u;
-  let ms_since_epoch = readU32(data_index, offset_in_struct);
-  offset_in_struct += 4u;
+  let x = readU16(id.x, current_offset);
+  current_offset += 2u;
+  let y = readU16(id.x, current_offset);
+  current_offset += 2u;
+  let color_index = readU8(id.x, current_offset);
+  current_offset += 1u;
+  let ms_since_epoch = readU32(id.x, current_offset);
+  current_offset += 4u;
 
   if (color_index == 255u) {
-      textureStore(
-      texture_out,
-      vec2<i32>(i32(ms_since_epoch), i32(ms_since_epoch)),
-      vec4<f32>(1.0, 1.0, 1.0, 1.0)
-    );
     // This update is just padding
     return;
   }
@@ -90,11 +76,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   storageBarrier();
   let previous_timestamp_value = atomicMax(&last_timestamp_for_tile[x + y * r_locals.width], ms_since_epoch);
   if (previous_timestamp_value > ms_since_epoch) {
-    // textureStore(
-    //   texture_out,
-    //   vec2<i32>(i32(x), i32(y)),
-    //   vec4<f32>(0.0, 0.0, 0.0, 1.0)
-    // )
     return;
   }
 

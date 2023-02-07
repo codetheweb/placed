@@ -72,7 +72,7 @@ impl Meta {
         Some(
             self.canvas_size_changes
                 .iter()
-                .max_by_key(|x| (x.width as u32) * (x.height as u32))?
+                .max_by_key(|x| x.width * x.height)?
                 .clone(),
         )
     }

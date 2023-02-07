@@ -47,7 +47,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
     pub fn new(dest: W) -> Self {
         let mut config = ArchiveWriterConfig::new();
         config.disable_layer(mla::Layers::ENCRYPT);
-        // config.enable_layer(mla::Layers::COMPRESS);
+        config.enable_layer(mla::Layers::COMPRESS);
         let mla = ArchiveWriter::from_config(dest, config).unwrap();
 
         PlacedArchiveWriter {

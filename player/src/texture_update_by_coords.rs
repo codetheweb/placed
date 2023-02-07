@@ -1,10 +1,4 @@
-use std::{
-    cmp::min,
-    mem::size_of,
-    num::{NonZeroU32, NonZeroU64},
-    sync::mpsc,
-    vec,
-};
+use std::{cmp::min, mem::size_of, num::NonZeroU32, vec};
 
 use archive::structures::{Meta, StoredTilePlacement};
 use wgpu::util::DeviceExt;
@@ -16,7 +10,6 @@ pub struct TextureUpdateByCoords {
     input_buffer: wgpu::Buffer,
     compute_pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
-    staging_belt: wgpu::util::StagingBelt,
 }
 
 impl TextureUpdateByCoords {
@@ -35,16 +28,10 @@ impl TextureUpdateByCoords {
         let MAX_SIZE = (size_of::<u32>() * 5)
             * (device.limits().max_compute_workgroups_per_dimension as usize);
 
-        // let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        //     label: Some("texture_update_by_coords input buffer"),
-        //     contents: bytemuck::cast_slice(&vec![0; MAX_SIZE]),
-        //     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        // });
-        let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
-            size: 134217728, // MAX_SIZE as u64,
+            contents: bytemuck::cast_slice(&vec![0; MAX_SIZE]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let mut r: Vec<[u32; 4]> = meta
@@ -90,7 +77,6 @@ impl TextureUpdateByCoords {
                 // temp
                 | wgpu::TextureUsages::COPY_SRC,
             label: None,
-            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         };
         let texture = device.create_texture(&texture_desc);
 
@@ -142,44 +128,26 @@ impl TextureUpdateByCoords {
             texture_view: some_view,
             compute_pipeline,
             bind_group,
-            staging_belt: wgpu::util::StagingBelt::new(
-                (TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device)
-                    * StoredTilePlacement::encoded_size()) as u64,
-            ),
         }
-    }
-
-    fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> usize {
-        let num_of_tiles_per_workgroup = 4;
-        (device.limits().max_compute_workgroups_per_dimension * num_of_tiles_per_workgroup) as usize
     }
 
     /// Make sure to only pass one tile per position, as it's not guaranteed that the order of tiles will be preserved during rendering.
     pub fn update(
         &mut self,
         device: &wgpu::Device,
-        // encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         chunk: Vec<u8>,
     ) {
-        // self.staging_belt.recall();
-        // let mut staging_belt = wgpu::util::StagingBelt::new(1024 * 1024);
-
-        // todo: make const
         let num_of_tiles_per_workgroup = 4;
+        let max_num_of_tiles_per_chunk =
+            device.limits().max_compute_workgroups_per_dimension * num_of_tiles_per_workgroup;
 
         let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
 
-        // let mut encoders = Vec::new();
-
         let mut current_tile_offset = 0;
         while current_tile_offset < num_of_tiles {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            });
-
             let next_tile_offset = min(
-                current_tile_offset + TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device),
+                current_tile_offset + (max_num_of_tiles_per_chunk as usize),
                 num_of_tiles,
             );
             let current = &chunk[(current_tile_offset * StoredTilePlacement::encoded_size())
@@ -187,8 +155,6 @@ impl TextureUpdateByCoords {
 
             // Pad
             let mut current = current.to_vec();
-            // let mut current = Vec::new();
-            // current.extend_from_slice(&chunk);
             while current.len()
                 % ((num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size())
                 != 0
@@ -198,23 +164,22 @@ impl TextureUpdateByCoords {
                     y: 0,
                     color_index: 255,
                     ms_since_epoch: 0,
-                }
-                .write_into(&mut current);
+                }.write_into(&mut current);
             }
 
-            // {
-            //     let mut b = self.staging_belt.write_buffer(
-            //         &mut encoder,
-            //         &self.input_buffer,
-            //         0,
-            //         NonZeroU64::new(current.len() as u64).unwrap(),
-            //         device,
-            //     );
-            //     b.copy_from_slice(&current);
-            // }
-            //     self.staging_belt.finish();
+            let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&current),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
 
-            queue.write_buffer(&self.input_buffer, 0, &current);
+            encoder.copy_buffer_to_buffer(
+                &staging_buffer,
+                0,
+                &self.input_buffer,
+                0,
+                (current.len()) as u64,
+            );
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -232,19 +197,7 @@ impl TextureUpdateByCoords {
             }
 
             current_tile_offset = next_tile_offset;
-
-            // encoders.push(encoder);
-            queue.submit(Some(encoder.finish()));
-
-            let (tx, rx) = mpsc::channel();
-            queue.on_submitted_work_done(move || {
-                tx.send(0).unwrap();
-            });
-            device.poll(wgpu::Maintain::Wait);
-            rx.recv().unwrap();
         }
-
-        // return encoders
     }
 }
 
@@ -254,7 +207,7 @@ mod tests {
     use image::{ImageBuffer, Rgba};
     use log::{log_enabled, Level};
     use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc};
-    use wgpu::Device;
+    use wgpu::{CommandEncoder, Device};
 
     use super::TextureUpdateByCoords;
 
@@ -267,15 +220,15 @@ mod tests {
             callback: F,
         ) -> ImageBuffer<Rgba<u8>, Vec<u8>>
         where
-            F: FnOnce(&Device, &mut wgpu::Queue, &mut TextureUpdateByCoords),
+            F: FnOnce(&Device, &mut CommandEncoder, &mut TextureUpdateByCoords),
         {
-            let (device, mut queue) = Self::get_device();
+            let (device, queue) = Self::get_device();
 
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
             let mut controller = TextureUpdateByCoords::new(&device, meta.clone());
-            callback(&device, &mut queue, &mut controller);
+            callback(&device, &mut encoder, &mut controller);
 
             let u32_size = std::mem::size_of::<u32>() as u32;
 
@@ -311,7 +264,6 @@ mod tests {
             );
 
             queue.submit(Some(encoder.finish()));
-            // queue.submit(encoders.into_iter().map(|e| e.finish()).chain(std::iter::once(encoder.finish())));
 
             let buffer_slice = output_buffer.slice(..);
 
@@ -345,7 +297,7 @@ mod tests {
             pollster::block_on(Self::get_device_async())
         }
         async fn get_device_async() -> (Device, wgpu::Queue) {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+            let instance = wgpu::Instance::new(wgpu::Backends::all());
 
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
@@ -425,280 +377,12 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn red_square() {
-    //     let mut color_id_to_tuple = BTreeMap::new();
-    //     color_id_to_tuple.insert(0, [255, 0, 0, 255]);
-
-    //     let texture_size: u32 = 64;
-
-    //     let meta = Meta {
-    //         chunk_descs: vec![],
-    //         color_id_to_tuple,
-    //         last_pixel_placed_at_seconds_since_epoch: 0,
-    //         canvas_size_changes: vec![CanvasSizeChange {
-    //             width: texture_size as u16,
-    //             height: texture_size as u16,
-    //             ms_since_epoch: 0,
-    //         }],
-    //     };
-
-    //     let mut data: Vec<u8> = Vec::new();
-
-    //     // Fill with red
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             let tile = StoredTilePlacement {
-    //                 x: x as u16,
-    //                 y: y as u16,
-    //                 color_index: 0,
-    //                 ms_since_epoch: 0,
-    //             };
-
-    //             tile.write_into(&mut data);
-    //         }
-    //     }
-
-    //     let buffer =
-    //         TestHelpers::render_to_buffer("red_square", meta, |device, encoder, controller| {
-    //             controller.update(device, encoder, data);
-    //         });
-
-    //     // Check generated texture
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
-    //         }
-    //     }
-    // }
-
-    // #[test]
-    // fn single_pixel() {
-    //     let mut color_id_to_tuple = BTreeMap::new();
-    //     color_id_to_tuple.insert(0, [255, 0, 0, 255]);
-
-    //     let texture_size: u32 = 64;
-
-    //     let meta = Meta {
-    //         chunk_descs: vec![],
-    //         color_id_to_tuple,
-    //         last_pixel_placed_at_seconds_since_epoch: 0,
-    //         canvas_size_changes: vec![CanvasSizeChange {
-    //             width: texture_size as u16,
-    //             height: texture_size as u16,
-    //             ms_since_epoch: 0,
-    //         }],
-    //     };
-
-    //     let mut data: Vec<u8> = Vec::new();
-
-    //     StoredTilePlacement {
-    //         x: 63,
-    //         y: 63,
-    //         color_index: 0,
-    //         ms_since_epoch: 0,
-    //     }
-    //     .write_into(&mut data);
-
-    //     let buffer =
-    //         TestHelpers::render_to_buffer("single_pixel", meta, |device, encoder, controller| {
-    //             controller.update(device, encoder, data);
-    //         });
-
-    //     // Check generated texture
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             if x == 63 && y == 63 {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
-    //             } else {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
-    //             }
-    //         }
-    //     }
-    // }
-
-    // #[test]
-    // fn multi_color() {
-    //     let mut color_id_to_tuple = BTreeMap::new();
-    //     color_id_to_tuple.insert(0, [255, 0, 0, 255]);
-    //     color_id_to_tuple.insert(1, [0, 255, 0, 255]);
-    //     color_id_to_tuple.insert(2, [0, 0, 255, 255]);
-
-    //     let texture_size: u32 = 64;
-
-    //     let meta = Meta {
-    //         chunk_descs: vec![],
-    //         color_id_to_tuple,
-    //         last_pixel_placed_at_seconds_since_epoch: 0,
-    //         canvas_size_changes: vec![CanvasSizeChange {
-    //             width: texture_size as u16,
-    //             height: texture_size as u16,
-    //             ms_since_epoch: 0,
-    //         }],
-    //     };
-
-    //     let mut data: Vec<u8> = Vec::new();
-
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             let tile = StoredTilePlacement {
-    //                 x: x as u16,
-    //                 y: y as u16,
-    //                 color_index: (x % 3) as u8,
-    //                 ms_since_epoch: 0,
-    //             };
-
-    //             tile.write_into(&mut data);
-    //         }
-    //     }
-
-    //     let buffer =
-    //         TestHelpers::render_to_buffer("multi_color", meta, |device, encoder, controller| {
-    //             controller.update(device, encoder, data);
-    //         });
-
-    //     // Check generated texture
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             let expected_color = match x % 3 {
-    //                 0 => [255, 0, 0, 255],
-    //                 1 => [0, 255, 0, 255],
-    //                 2 => [0, 0, 255, 255],
-    //                 _ => unreachable!(),
-    //             };
-
-    //             assert_eq!(buffer.get_pixel(x, y), &Rgba(expected_color));
-    //         }
-    //     }
-    // }
-
-    // #[test]
-    // fn discards_earlier_timestamps() {
-    //     let mut color_id_to_tuple = BTreeMap::new();
-    //     color_id_to_tuple.insert(0, [0, 0, 0, 255]);
-    //     color_id_to_tuple.insert(1, [255, 0, 0, 255]);
-
-    //     let texture_size: u32 = 64;
-
-    //     let meta = Meta {
-    //         chunk_descs: vec![],
-    //         color_id_to_tuple,
-    //         last_pixel_placed_at_seconds_since_epoch: 0,
-    //         canvas_size_changes: vec![CanvasSizeChange {
-    //             width: texture_size as u16,
-    //             height: texture_size as u16,
-    //             ms_since_epoch: 0,
-    //         }],
-    //     };
-
-    //     let mut data: Vec<u8> = Vec::new();
-
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             if x % 2 == 0 {
-    //                 StoredTilePlacement {
-    //                     x: x as u16,
-    //                     y: y as u16,
-    //                     color_index: 0,
-    //                     ms_since_epoch: 1,
-    //                 }
-    //                 .write_into(&mut data);
-    //             }
-
-    //             StoredTilePlacement {
-    //                 x: x as u16,
-    //                 y: y as u16,
-    //                 color_index: 1,
-    //                 ms_since_epoch: 0,
-    //             }
-    //             .write_into(&mut data);
-    //         }
-    //     }
-
-    //     let buffer = TestHelpers::render_to_buffer(
-    //         "discards_earlier_timestamp",
-    //         meta,
-    //         |device, encoder, controller| {
-    //             controller.update(device, encoder, data);
-    //         },
-    //     );
-
-    //     // Check generated texture
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             if x % 2 == 0 {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
-    //             } else {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
-    //             }
-    //         }
-    //     }
-    // }
-
-    // #[test]
-    // fn odd_number_of_tiles() {
-    //     let mut color_id_to_tuple = BTreeMap::new();
-    //     color_id_to_tuple.insert(0, [0, 0, 0, 255]);
-
-    //     let texture_size: u32 = 64;
-
-    //     let meta = Meta {
-    //         chunk_descs: vec![],
-    //         color_id_to_tuple,
-    //         last_pixel_placed_at_seconds_since_epoch: 0,
-    //         canvas_size_changes: vec![CanvasSizeChange {
-    //             width: texture_size as u16,
-    //             height: texture_size as u16,
-    //             ms_since_epoch: 0,
-    //         }],
-    //     };
-
-    //     let mut data: Vec<u8> = Vec::new();
-
-    //     for i in 0..7 {
-    //         StoredTilePlacement {
-    //             x: i as u16,
-    //             y: i as u16,
-    //             color_index: 0,
-    //             ms_since_epoch: 0,
-    //         }
-    //         .write_into(&mut data);
-    //     }
-
-    //     let buffer = TestHelpers::render_to_buffer(
-    //         "odd_number_of_tiles",
-    //         meta,
-    //         |device, encoder, controller| {
-    //             controller.update(device, encoder, data);
-    //         },
-    //     );
-
-    //     // Check generated texture
-    //     for x in 0..texture_size {
-    //         for y in 0..texture_size {
-    //             if x < 7 && y < 7 && x == y {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
-    //             } else {
-    //                 assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
-    //             }
-    //         }
-    //     }
-    // }
-
     #[test]
-    fn multiple_compute_passes() {
+    fn red_square() {
         let mut color_id_to_tuple = BTreeMap::new();
-        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
-        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
-        color_id_to_tuple.insert(2, [0, 255, 0, 255]);
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
 
-        let (device, _) = TestHelpers::get_device();
-        // todo: replace 16 with const
-        let required_number_of_tile_updates =
-            device.limits().max_compute_workgroups_per_dimension * 16;
         let texture_size: u32 = 64;
-        let required_num_of_updates_per_tile =
-            required_number_of_tile_updates / (texture_size * texture_size);
 
         let meta = Meta {
             chunk_descs: vec![],
@@ -713,36 +397,244 @@ mod tests {
 
         let mut data: Vec<u8> = Vec::new();
 
-        for i in 0..required_num_of_updates_per_tile {
-            for x in 0..texture_size {
-                for y in 0..texture_size {
+        // Fill with red
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let tile = StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 0,
+                    ms_since_epoch: 0,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        let buffer =
+            TestHelpers::render_to_buffer("red_square", meta, |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            });
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+            }
+        }
+    }
+
+    #[test]
+    fn single_pixel() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        StoredTilePlacement {
+            x: 63,
+            y: 63,
+            color_index: 0,
+            ms_since_epoch: 0,
+        }
+        .write_into(&mut data);
+
+        let buffer =
+            TestHelpers::render_to_buffer("single_pixel", meta, |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            });
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x == 63 && y == 63 {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_color() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [0, 255, 0, 255]);
+        color_id_to_tuple.insert(2, [0, 0, 255, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let tile = StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: (x % 3) as u8,
+                    ms_since_epoch: 0,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        let buffer =
+            TestHelpers::render_to_buffer("multi_color", meta, |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            });
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let expected_color = match x % 3 {
+                    0 => [255, 0, 0, 255],
+                    1 => [0, 255, 0, 255],
+                    2 => [0, 0, 255, 255],
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(buffer.get_pixel(x, y), &Rgba(expected_color));
+            }
+        }
+    }
+
+    #[test]
+    fn discards_earlier_timestamps() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x % 2 == 0 {
                     StoredTilePlacement {
                         x: x as u16,
                         y: y as u16,
-                        color_index: (i % 3) as u8,
-                        ms_since_epoch: i,
+                        color_index: 0,
+                        ms_since_epoch: 1,
                     }
                     .write_into(&mut data);
                 }
+
+                StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 1,
+                    ms_since_epoch: 0,
+                }
+                .write_into(&mut data);
             }
         }
 
         let buffer = TestHelpers::render_to_buffer(
-            "multiple_compute_passes",
+            "discards_earlier_timestamp",
             meta,
-            |device, encoder, controller| controller.update(device, encoder, data),
+            |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            },
         );
 
         // Check generated texture
-        // for x in 0..texture_size {
-        //     for y in 0..texture_size {
-        //         if x < 7 && y < 7 && x == y {
-        //             assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
-        //         } else {
-        //             assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
-        //         }
-        //     }
-        // }
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x % 2 == 0 {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn odd_number_of_tiles() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for i in 0..7 {
+            StoredTilePlacement {
+                x: i as u16,
+                y: i as u16,
+                color_index: 0,
+                ms_since_epoch: 0,
+            }
+            .write_into(&mut data);
+        }
+
+        let buffer = TestHelpers::render_to_buffer(
+            "odd_number_of_tiles",
+            meta,
+            |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x < 7 && y < 7 && x == y {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
     }
 }
 
