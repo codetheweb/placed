@@ -20,9 +20,8 @@ struct Locals {
 
 @group(0) @binding(0) var<storage, read> tile_updates : array<FourTileUpdate>;
 @group(0) @binding(1) var<uniform> r_locals : Locals;
-@group(0) @binding(2) var texture_out : texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(3) var<storage, read_write> last_timestamp_for_tile : array<atomic<u32>>;
-@group(0) @binding(4) var<storage, read_write> last_index_for_tile : array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> last_index_for_tile : array<atomic<u32>>;
+@group(0) @binding(3) var texture_out : texture_storage_2d<rgba8unorm, write>;
 
 fn readU8(i: u32, current_offset: u32) -> u32 {
 	var ipos : u32 = current_offset / 4u;
@@ -84,8 +83,6 @@ fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  atomicMax(&last_timestamp_for_tile[tile.x + tile.y * r_locals.width], tile.ms_since_epoch);
-
   let current_data_index = (id.x * 3u) + id.y;
   atomicMax(&last_index_for_tile[tile.x + tile.y * r_locals.width], current_data_index);
 }
@@ -105,11 +102,6 @@ fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
 
   if (tile.color_index == 255u) {
     // This update is just padding
-    return;
-  }
-
-  let max_timestamp_for_tile = atomicLoad(&last_timestamp_for_tile[tile.x + tile.y * r_locals.width]);
-  if (max_timestamp_for_tile != tile.ms_since_epoch) {
     return;
   }
 

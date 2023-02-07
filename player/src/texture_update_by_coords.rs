@@ -106,13 +106,6 @@ impl TextureUpdateByCoords {
 
         let z = vec![0; size.width as usize * size.height as usize];
 
-        let last_timestamp_for_tile =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("texture_update_by_coords last timestamp buffer"),
-                contents: bytemuck::cast_slice(&z),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-
         let last_index_for_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords last index buffer"),
             contents: bytemuck::cast_slice(&z),
@@ -141,11 +134,7 @@ impl TextureUpdateByCoords {
                         resource: locals_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: last_timestamp_for_tile.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
+                        binding: 2,
                         resource: last_index_for_tile.as_entire_binding(),
                     },
                 ],
@@ -166,15 +155,11 @@ impl TextureUpdateByCoords {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&some_view),
+                    resource: last_index_for_tile.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: last_timestamp_for_tile.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: last_index_for_tile.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(&some_view),
                 },
             ],
         });
