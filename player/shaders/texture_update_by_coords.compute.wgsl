@@ -1,4 +1,4 @@
-let SIZE_OF_COORDINATE_UPDATE_BYTES = 9u;
+const SIZE_OF_COORDINATE_UPDATE_BYTES = 9u;
 
 struct FourTileUpdate {
   data: array<u32, SIZE_OF_COORDINATE_UPDATE_BYTES>

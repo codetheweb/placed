@@ -9,7 +9,7 @@ edition = "2021"
 archive = { path = "../archive" }
 colors-transform = "0.2.11"
 game-loop = { version = "0.10.0", features = ["winit"] }
-wgpu = "0.14.2"
+wgpu = "0.15.0"
 winit = "0.27"
 winit_input_helper = "0.13"
 pollster = "0.2"

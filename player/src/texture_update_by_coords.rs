@@ -85,6 +85,7 @@ impl TextureUpdateByCoords {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
@@ -377,7 +378,7 @@ mod tests {
             pollster::block_on(Self::get_device_async())
         }
         async fn get_device_async() -> (Device, wgpu::Queue) {
-            let instance = wgpu::Instance::new(wgpu::Backends::all());
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
 
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
