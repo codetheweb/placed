@@ -8,21 +8,36 @@ pub struct TextureUpdateByCoords {
     texture_extent: wgpu::Extent3d,
     pub texture_view: wgpu::TextureView,
     input_buffer: wgpu::Buffer,
-    compute_pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
+    zeros_buffer: wgpu::Buffer,
+    calculate_final_tiles_pipeline: wgpu::ComputePipeline,
+    calculate_final_tiles_bind_group: wgpu::BindGroup,
+    update_texture_pipeline: wgpu::ComputePipeline,
+    update_texture_bind_group: wgpu::BindGroup,
+    last_index_for_tile: wgpu::Buffer,
 }
+
+// todo: add note about assuming sorted input
 
 impl TextureUpdateByCoords {
     pub fn new(device: &wgpu::Device, meta: Meta) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/texture_update_by_coords.compute.wgsl");
         let module = device.create_shader_module(shader);
 
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &module,
-            entry_point: "main",
-        });
+        let calculate_final_tiles_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("texture_update_by_coords calculate_final_tiles_pipeline"),
+                layout: None,
+                module: &module,
+                entry_point: "calculate_final_tiles",
+            });
+
+        let update_texture_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("texture_update_by_coords update_texture_pipeline"),
+                layout: None,
+                module: &module,
+                entry_point: "update_texture",
+            });
 
         // todo: pull struct size automatically
         let MAX_SIZE = (size_of::<u32>() * 5)
@@ -50,8 +65,8 @@ impl TextureUpdateByCoords {
 
         let mut r = r.into_iter().flatten().collect::<Vec<u32>>();
         // Padding for alignment
-        r.append(&mut vec![0; 16]);
         r.append(&mut vec![size.width.into(), size.height.into()]);
+        r.append(&mut vec![0; 2]);
 
         let locals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords locals buffer"),
@@ -97,10 +112,48 @@ impl TextureUpdateByCoords {
                 usage: wgpu::BufferUsages::STORAGE,
             });
 
-        let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let last_index_for_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("texture_update_by_coords last index buffer"),
+            contents: bytemuck::cast_slice(&z),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let zeros_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("texture_update_by_coords zeros buffer buffer"),
+            contents: bytemuck::cast_slice(&z),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+
+        let calculate_final_tiles_bind_group_layout =
+            calculate_final_tiles_pipeline.get_bind_group_layout(0);
+        let calculate_final_tiles_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &calculate_final_tiles_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: input_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: locals_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: last_timestamp_for_tile.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: last_index_for_tile.as_entire_binding(),
+                    },
+                ],
+            });
+
+        let update_texture_bind_group_layout = update_texture_pipeline.get_bind_group_layout(0);
+        let update_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &bind_group_layout,
+            layout: &update_texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -118,6 +171,10 @@ impl TextureUpdateByCoords {
                     binding: 3,
                     resource: last_timestamp_for_tile.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: last_index_for_tile.as_entire_binding(),
+                },
             ],
         });
 
@@ -126,8 +183,12 @@ impl TextureUpdateByCoords {
             texture,
             texture_extent,
             texture_view: some_view,
-            compute_pipeline,
-            bind_group,
+            calculate_final_tiles_pipeline,
+            calculate_final_tiles_bind_group,
+            update_texture_pipeline,
+            update_texture_bind_group,
+            zeros_buffer,
+            last_index_for_tile,
         }
     }
 
@@ -138,6 +199,15 @@ impl TextureUpdateByCoords {
         encoder: &mut wgpu::CommandEncoder,
         chunk: Vec<u8>,
     ) {
+        // Clear state data from last chunk
+        encoder.copy_buffer_to_buffer(
+            &self.zeros_buffer,
+            0,
+            &self.last_index_for_tile,
+            0,
+            self.zeros_buffer.size(),
+        );
+
         let num_of_tiles_per_workgroup = 4;
         let max_num_of_tiles_per_chunk =
             device.limits().max_compute_workgroups_per_dimension * num_of_tiles_per_workgroup;
@@ -164,7 +234,8 @@ impl TextureUpdateByCoords {
                     y: 0,
                     color_index: 255,
                     ms_since_epoch: 0,
-                }.write_into(&mut current);
+                }
+                .write_into(&mut current);
             }
 
             let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -181,17 +252,26 @@ impl TextureUpdateByCoords {
                 (current.len()) as u64,
             );
 
+            let num_of_workgroups = f32::ceil(
+                (next_tile_offset - current_tile_offset) as f32 / num_of_tiles_per_workgroup as f32,
+            ) as u32;
+
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("texture_update_by_coords compute pass"),
+                    label: Some("texture_update_by_coords.calculate_final_tiles compute pass"),
                 });
-                cpass.set_pipeline(&self.compute_pipeline);
-                cpass.set_bind_group(0, &self.bind_group, &[]);
+                cpass.set_pipeline(&self.calculate_final_tiles_pipeline);
+                cpass.set_bind_group(0, &self.calculate_final_tiles_bind_group, &[]);
 
-                let num_of_workgroups = f32::ceil(
-                    (next_tile_offset - current_tile_offset) as f32
-                        / num_of_tiles_per_workgroup as f32,
-                ) as u32;
+                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_per_workgroup, 1);
+            }
+
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("texture_update_by_coords.update_texture compute pass"),
+                });
+                cpass.set_pipeline(&self.update_texture_pipeline);
+                cpass.set_bind_group(0, &self.update_texture_bind_group, &[]);
 
                 cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_per_workgroup, 1);
             }
@@ -525,69 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn discards_earlier_timestamps() {
-        let mut color_id_to_tuple = BTreeMap::new();
-        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
-        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
-
-        let texture_size: u32 = 64;
-
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
-        let mut data: Vec<u8> = Vec::new();
-
-        for x in 0..texture_size {
-            for y in 0..texture_size {
-                if x % 2 == 0 {
-                    StoredTilePlacement {
-                        x: x as u16,
-                        y: y as u16,
-                        color_index: 0,
-                        ms_since_epoch: 1,
-                    }
-                    .write_into(&mut data);
-                }
-
-                StoredTilePlacement {
-                    x: x as u16,
-                    y: y as u16,
-                    color_index: 1,
-                    ms_since_epoch: 0,
-                }
-                .write_into(&mut data);
-            }
-        }
-
-        let buffer = TestHelpers::render_to_buffer(
-            "discards_earlier_timestamp",
-            meta,
-            |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            },
-        );
-
-        // Check generated texture
-        for x in 0..texture_size {
-            for y in 0..texture_size {
-                if x % 2 == 0 {
-                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
-                } else {
-                    assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
-                }
-            }
-        }
-    }
-
-    #[test]
     fn odd_number_of_tiles() {
         let mut color_id_to_tuple = BTreeMap::new();
         color_id_to_tuple.insert(0, [0, 0, 0, 255]);
@@ -633,6 +650,63 @@ mod tests {
                 } else {
                     assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_order_of_tiles_in_chunk() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 0,
+                    ms_since_epoch: 0,
+                }
+                .write_into(&mut data);
+
+                StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 1,
+                    ms_since_epoch: 0,
+                }
+                .write_into(&mut data);
+            }
+        }
+
+        let buffer = TestHelpers::render_to_buffer(
+            "preserves_order_of_tiles_in_chunk",
+            meta,
+            |device, encoder, controller| {
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
             }
         }
     }
