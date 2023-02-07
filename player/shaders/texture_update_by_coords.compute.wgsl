@@ -90,6 +90,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   storageBarrier();
   let previous_timestamp_value = atomicMax(&last_timestamp_for_tile[x + y * r_locals.width], ms_since_epoch);
   if (previous_timestamp_value > ms_since_epoch) {
+    // textureStore(
+    //   texture_out,
+    //   vec2<i32>(i32(x), i32(y)),
+    //   vec4<f32>(0.0, 0.0, 0.0, 1.0)
+    // )
     return;
   }
 
