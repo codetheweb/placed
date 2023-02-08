@@ -54,9 +54,12 @@ fn main() {
                 let color_str = record.get(2).unwrap().to_string();
                 let parsed_color = colors_transform::Rgb::from_hex_str(&color_str).unwrap();
 
-                // todo: panic if coords contain more than 1 ,
-
                 let clean_coords = record.get(3).unwrap().replace('"', "");
+                // todo: handle moderator edits
+                if clean_coords.matches(',').count() != 1 {
+                    println!("Invalid coordinates: {}", clean_coords);
+                    continue;
+                }
                 let mut coords = clean_coords.split(',');
                 let x_str = coords.next().unwrap();
                 let y_str = coords.next().unwrap();
