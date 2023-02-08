@@ -68,14 +68,6 @@ fn readTile(four_tile_offset: u32, offset_in_four_tiles: u32) -> DecodedTileUpda
 @compute
 @workgroup_size(1)
 fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= arrayLength(&tile_updates)) {
-    return;
-  }
-
-  if (id.y > 3u) {
-    return;
-  }
-
   let tile = readTile(id.x, id.y);
 
   if (tile.color_index == 255u) {
@@ -83,21 +75,13 @@ fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  let current_data_index = (id.x * 3u) + id.y;
+  let current_data_index = (id.x * 4u) + id.y;
   atomicMax(&last_index_for_tile[tile.x + tile.y * r_locals.width], current_data_index);
 }
 
 @compute
 @workgroup_size(1)
 fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= arrayLength(&tile_updates)) {
-    return;
-  }
-
-  if (id.y > 3u) {
-    return;
-  }
-
   let tile = readTile(id.x, id.y);
 
   if (tile.color_index == 255u) {
@@ -105,7 +89,7 @@ fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  let current_data_index = (id.x * 3u) + id.y;
+  let current_data_index = (id.x * 4u) + id.y;
   let max_data_index_for_tile = atomicLoad(&last_index_for_tile[tile.x + tile.y * r_locals.width]);
 
   if (max_data_index_for_tile != current_data_index) {

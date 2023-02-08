@@ -22,6 +22,8 @@ pub struct TextureUpdateByCoords {
     staging_belt: wgpu::util::StagingBelt,
 }
 
+const NUM_OF_TILES_PER_WORKGROUP: u32 = 4;
+
 // todo: add note about assuming sorted input
 
 impl TextureUpdateByCoords {
@@ -45,13 +47,12 @@ impl TextureUpdateByCoords {
                 entry_point: "update_texture",
             });
 
-        // todo: pull struct size automatically
-        let MAX_SIZE = (size_of::<u32>() * 5)
-            * (device.limits().max_compute_workgroups_per_dimension as usize);
+        let max_input_size = TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(&device)
+            * (StoredTilePlacement::encoded_size() as u32);
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
-            contents: bytemuck::cast_slice(&vec![0; MAX_SIZE]),
+            contents: bytemuck::cast_slice(&vec![0u32; max_input_size.try_into().unwrap()]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -110,7 +111,7 @@ impl TextureUpdateByCoords {
             ..Default::default()
         });
 
-        let z = vec![0; size.width as usize * size.height as usize];
+        let z = vec![0u32; size.width as usize * size.height as usize];
 
         let last_index_for_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords last index buffer"),
@@ -182,7 +183,7 @@ impl TextureUpdateByCoords {
             zeros_buffer,
             last_index_for_tile,
             // todo: use correct chunk size
-            staging_belt: wgpu::util::StagingBelt::new(1024),
+            staging_belt: wgpu::util::StagingBelt::new(max_input_size.into()),
         }
     }
 
@@ -193,26 +194,15 @@ impl TextureUpdateByCoords {
         encoder: &mut wgpu::CommandEncoder,
         chunk: Vec<u8>,
     ) {
-        // Clear state data from last chunk
-        encoder.copy_buffer_to_buffer(
-            &self.zeros_buffer,
-            0,
-            &self.last_index_for_tile,
-            0,
-            self.zeros_buffer.size(),
-        );
         self.staging_belt.recall();
-
-        let num_of_tiles_per_workgroup = 4;
-        let max_num_of_tiles_per_chunk =
-            device.limits().max_compute_workgroups_per_dimension * num_of_tiles_per_workgroup;
 
         let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
 
         let mut current_tile_offset = 0;
         while current_tile_offset < num_of_tiles {
             let next_tile_offset = min(
-                current_tile_offset + (max_num_of_tiles_per_chunk as usize),
+                current_tile_offset
+                    + (TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) as usize),
                 num_of_tiles,
             );
             let current = &chunk[(current_tile_offset * StoredTilePlacement::encoded_size())
@@ -221,7 +211,7 @@ impl TextureUpdateByCoords {
             // Pad
             let mut current = current.to_vec();
             while current.len()
-                % ((num_of_tiles_per_workgroup as usize) * StoredTilePlacement::encoded_size())
+                % ((NUM_OF_TILES_PER_WORKGROUP as usize) * StoredTilePlacement::encoded_size())
                 != 0
             {
                 StoredTilePlacement {
@@ -244,11 +234,18 @@ impl TextureUpdateByCoords {
                 s.copy_from_slice(&current);
             }
 
-            self.staging_belt.finish();
-
             let num_of_workgroups = f32::ceil(
-                (next_tile_offset - current_tile_offset) as f32 / num_of_tiles_per_workgroup as f32,
+                (next_tile_offset - current_tile_offset) as f32 / NUM_OF_TILES_PER_WORKGROUP as f32,
             ) as u32;
+
+            // Clear state data from last chunk
+            encoder.copy_buffer_to_buffer(
+                &self.zeros_buffer,
+                0,
+                &self.last_index_for_tile,
+                0,
+                self.zeros_buffer.size(),
+            );
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -257,7 +254,7 @@ impl TextureUpdateByCoords {
                 cpass.set_pipeline(&self.calculate_final_tiles_pipeline);
                 cpass.set_bind_group(0, &self.calculate_final_tiles_bind_group, &[]);
 
-                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_per_workgroup, 1);
+                cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
             }
 
             {
@@ -267,11 +264,17 @@ impl TextureUpdateByCoords {
                 cpass.set_pipeline(&self.update_texture_pipeline);
                 cpass.set_bind_group(0, &self.update_texture_bind_group, &[]);
 
-                cpass.dispatch_workgroups(num_of_workgroups, num_of_tiles_per_workgroup, 1);
+                cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
             }
 
             current_tile_offset = next_tile_offset;
         }
+
+        self.staging_belt.finish();
+    }
+
+    fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> u32 {
+        device.limits().max_compute_workgroups_per_dimension * NUM_OF_TILES_PER_WORKGROUP
     }
 }
 
@@ -704,6 +707,81 @@ mod tests {
             }
         }
     }
-}
 
-// todo: add test for race condition when chunking is necessary
+    #[test]
+    fn multiple_chunks() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple: color_id_to_tuple.clone(),
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut expected_color_index = 0;
+
+        let buffer = TestHelpers::render_to_buffer(
+            "multiple_chunks",
+            meta,
+            |device, encoder, controller| {
+                let required_num_of_tile_updates =
+                    TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) * 2;
+                let required_num_of_full_texture_refreshes =
+                    required_num_of_tile_updates / (texture_size * texture_size);
+
+                let mut data: Vec<u8> = Vec::new();
+
+                for i in 0..required_num_of_full_texture_refreshes {
+                    if i % 2 == 0 {
+                        for x in 0..texture_size {
+                            for y in 0..texture_size {
+                                StoredTilePlacement {
+                                    x: x as u16,
+                                    y: y as u16,
+                                    color_index: 0,
+                                    ms_since_epoch: 0,
+                                }
+                                .write_into(&mut data);
+                            }
+                        }
+
+                        expected_color_index = 0;
+                    } else {
+                        for x in (0..texture_size).rev() {
+                            for y in (0..texture_size).rev() {
+                                StoredTilePlacement {
+                                    x: x as u16,
+                                    y: y as u16,
+                                    color_index: 1,
+                                    ms_since_epoch: 0,
+                                }
+                                .write_into(&mut data);
+                            }
+                        }
+
+                        expected_color_index = 1;
+                    }
+                }
+
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        let expected_color = Rgba(*color_id_to_tuple.get(&expected_color_index).unwrap());
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(buffer.get_pixel(x, y), &expected_color);
+            }
+        }
+    }
+}
