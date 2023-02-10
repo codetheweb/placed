@@ -234,6 +234,8 @@ impl TextureUpdateByCoords {
                 s.copy_from_slice(&current);
             }
 
+            self.staging_belt.finish();
+
             let num_of_workgroups = f32::ceil(
                 (next_tile_offset - current_tile_offset) as f32 / NUM_OF_TILES_PER_WORKGROUP as f32,
             ) as u32;
@@ -269,8 +271,6 @@ impl TextureUpdateByCoords {
 
             current_tile_offset = next_tile_offset;
         }
-
-        self.staging_belt.finish();
     }
 
     fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> u32 {
@@ -283,6 +283,7 @@ mod tests {
     use archive::structures::{CanvasSizeChange, Meta, StoredTilePlacement};
     use image::{ImageBuffer, Rgba};
     use log::{log_enabled, Level};
+    use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc};
     use wgpu::{CommandEncoder, Device};
 
@@ -781,6 +782,88 @@ mod tests {
         for x in 0..texture_size {
             for y in 0..texture_size {
                 assert_eq!(buffer.get_pixel(x, y), &expected_color);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
+        color_id_to_tuple.insert(2, [0, 255, 0, 255]);
+        color_id_to_tuple.insert(3, [0, 0, 255, 255]);
+        color_id_to_tuple.insert(4, [255, 255, 0, 255]);
+        color_id_to_tuple.insert(5, [255, 0, 255, 255]);
+        color_id_to_tuple.insert(6, [0, 255, 255, 255]);
+        color_id_to_tuple.insert(7, [255, 255, 255, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple: color_id_to_tuple.clone(),
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut expected_texture: Vec<Vec<u8>> =
+            vec![vec![0; texture_size as usize]; texture_size as usize];
+
+        let mut generator = rand::thread_rng();
+
+        let buffer = TestHelpers::render_to_buffer(
+            "fuzz",
+            meta,
+            |device, encoder, controller| {
+                let required_num_of_tile_updates =
+                    TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) * 2;
+
+                let mut data: Vec<u8> = Vec::new();
+
+                for _ in 0..required_num_of_tile_updates {
+                    let x = generator.gen_range(0..texture_size);
+                    let y = generator.gen_range(0..texture_size);
+
+                    StoredTilePlacement {
+                        x: x as u16,
+                        y: y as u16,
+                        color_index: 0,
+                        ms_since_epoch: 0,
+                    }
+                    .write_into(&mut data);
+
+                    let color_index = generator.gen_range(0..4);
+                    StoredTilePlacement {
+                        x: x as u16,
+                        y: y as u16,
+                        color_index,
+                        ms_since_epoch: 0,
+                    }
+                    .write_into(&mut data);
+
+                    expected_texture[x as usize][y as usize] = color_index;
+                }
+
+                controller.update(device, encoder, data);
+            },
+        );
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(
+                    buffer.get_pixel(x, y),
+                    &Rgba(
+                        *color_id_to_tuple
+                            .get(&expected_texture[x as usize][y as usize])
+                            .unwrap()
+                    )
+                );
             }
         }
     }
