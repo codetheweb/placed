@@ -163,7 +163,7 @@ mod tests {
             expected_tiles.push(tile);
         }
 
-        archive_writer.finalize();
+        archive_writer.finalize(false);
 
         let reader = PlacedArchiveReader::new(readable_file).unwrap();
         let read_tiles = reader.collect::<Vec<_>>();

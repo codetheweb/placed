@@ -13,4 +13,3 @@ colors-transform = "0.2.11"
 
 [dev-dependencies]
 rand = "0.8.5"
-tempfile = "3.3.0"

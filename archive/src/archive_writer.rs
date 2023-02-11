@@ -72,7 +72,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
         });
     }
 
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self, should_generate_snapshots: bool) {
         self.tile_placements.sort();
 
         let first_tile_placed_at = self.tile_placements.first().unwrap().placed_at;
@@ -148,47 +148,50 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
             .unwrap();
 
         // Generate snapshots
-        let largest_canvas_size = meta.get_largest_canvas_size().unwrap();
-        let mut canvas = RgbImage::new(
-            largest_canvas_size.width as u32,
-            largest_canvas_size.height as u32,
-        );
+        if should_generate_snapshots {
+            let largest_canvas_size = meta.get_largest_canvas_size().unwrap();
+            let mut canvas = RgbImage::new(
+                largest_canvas_size.width as u32,
+                largest_canvas_size.height as u32,
+            );
+            canvas.fill(0xff);
 
-        let mut num_of_processed_tiles = 0;
-        for chunk in meta.chunk_descs {
-            for tile in self.tile_placements[num_of_processed_tiles..]
-                .iter()
-                .take(chunk.num_tiles as usize)
-            {
-                canvas.put_pixel(
-                    tile.x as u32,
-                    tile.y as u32,
-                    image::Rgb(
-                        meta.color_id_to_tuple[&tile.color_index][0..3]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                );
+            let mut num_of_processed_tiles = 0;
+            for chunk in meta.chunk_descs {
+                for tile in self.tile_placements[num_of_processed_tiles..]
+                    .iter()
+                    .take(chunk.num_tiles as usize)
+                {
+                    canvas.put_pixel(
+                        tile.x as u32,
+                        tile.y as u32,
+                        image::Rgb(
+                            meta.color_id_to_tuple[&tile.color_index][0..3]
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    );
+                }
+
+                num_of_processed_tiles += chunk.num_tiles as usize;
+
+                let mut temp_snapshot = tempfile().unwrap();
+                let mut buf = Vec::new();
+                // needs a seekable writer
+                canvas
+                    .write_to(&mut temp_snapshot, image::ImageOutputFormat::Png)
+                    .unwrap();
+                temp_snapshot.seek(SeekFrom::Start(0)).unwrap();
+                temp_snapshot.read_to_end(&mut buf).unwrap();
+
+                self.mla
+                    .add_file(
+                        format!("snapshots/{}", chunk.id).as_str(),
+                        buf.len() as u64,
+                        buf.as_slice(),
+                    )
+                    .unwrap();
             }
-
-            num_of_processed_tiles += chunk.num_tiles as usize;
-
-            let mut temp_snapshot = tempfile().unwrap();
-            let mut buf = Vec::new();
-            // needs a seekable writer
-            canvas
-                .write_to(&mut temp_snapshot, image::ImageOutputFormat::Png)
-                .unwrap();
-            temp_snapshot.seek(SeekFrom::Start(0)).unwrap();
-            temp_snapshot.read_to_end(&mut buf).unwrap();
-
-            self.mla
-                .add_file(
-                    format!("snapshots/{}", chunk.id).as_str(),
-                    buf.len() as u64,
-                    buf.as_slice(),
-                )
-                .unwrap();
         }
 
         self.mla.finalize().unwrap();

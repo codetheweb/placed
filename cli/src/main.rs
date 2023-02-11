@@ -79,7 +79,7 @@ fn main() {
                 );
             }
 
-            archive_writer.finalize();
+            archive_writer.finalize(true);
         }
         Commands::Render {
             archive_path,
