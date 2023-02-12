@@ -20,7 +20,7 @@ struct Locals {
 
 @group(0) @binding(0) var<storage, read> tile_updates : array<FourTileUpdate>;
 @group(0) @binding(1) var<uniform> r_locals : Locals;
-@group(0) @binding(2) var<storage, read_write> last_index_for_tile : array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> last_index_for_tile : array<atomic<u32>, 4000000>;
 @group(0) @binding(3) var texture_out : texture_storage_2d<rgba8unorm, write>;
 
 fn readU8(i: u32, current_offset: u32) -> u32 {
@@ -65,9 +65,18 @@ fn readTile(four_tile_offset: u32, offset_in_four_tiles: u32) -> DecodedTileUpda
   return tile;
 }
 
+fn getTileIndex(tile: DecodedTileUpdate) -> u32 {
+  return tile.x + (tile.y * r_locals.height);
+}
+
 @compute
 @workgroup_size(1)
 fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
+  let current_data_index = (id.x * 4u) + id.y;
+  if (current_data_index >= arrayLength(&tile_updates)) {
+    return;
+  }
+
   let tile = readTile(id.x, id.y);
 
   if (tile.color_index == 255u) {
@@ -75,13 +84,17 @@ fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  let current_data_index = (id.x * 4u) + id.y;
-  atomicMax(&last_index_for_tile[tile.x + tile.y * r_locals.width], current_data_index);
+  atomicMax(&last_index_for_tile[getTileIndex(tile)], current_data_index);
 }
 
 @compute
 @workgroup_size(1)
 fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
+  let current_data_index = (id.x * 4u) + id.y;
+  if (current_data_index >= arrayLength(&tile_updates)) {
+    return;
+  }
+
   let tile = readTile(id.x, id.y);
 
   if (tile.color_index == 255u) {
@@ -89,10 +102,9 @@ fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  let current_data_index = (id.x * 4u) + id.y;
-  let max_data_index_for_tile = atomicLoad(&last_index_for_tile[tile.x + tile.y * r_locals.width]);
+  let max_data_index_for_tile = atomicLoad(&last_index_for_tile[getTileIndex(tile)]);
 
-  if (max_data_index_for_tile != current_data_index) {
+  if (current_data_index != max_data_index_for_tile) {
     return;
   }
 
