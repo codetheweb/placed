@@ -97,7 +97,7 @@ impl TextureUpdateByCoords {
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
-                // temp
+                // todo: temp
                 | wgpu::TextureUsages::COPY_SRC,
             label: None,
         };
@@ -188,6 +188,7 @@ impl TextureUpdateByCoords {
     }
 
     /// Make sure to only pass one tile per position, as it's not guaranteed that the order of tiles will be preserved during rendering.
+    /// todo: add note about calling only once per frame
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -240,15 +241,6 @@ impl TextureUpdateByCoords {
                 (next_tile_offset - current_tile_offset) as f32 / NUM_OF_TILES_PER_WORKGROUP as f32,
             ) as u32;
 
-            // Clear state data from last chunk
-            encoder.copy_buffer_to_buffer(
-                &self.zeros_buffer,
-                0,
-                &self.last_index_for_tile,
-                0,
-                self.zeros_buffer.size(),
-            );
-
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("texture_update_by_coords.calculate_final_tiles compute pass"),
@@ -270,6 +262,15 @@ impl TextureUpdateByCoords {
             }
 
             current_tile_offset = next_tile_offset;
+
+            // Clear state data in preparation for next chunk
+            encoder.copy_buffer_to_buffer(
+                &self.zeros_buffer,
+                0,
+                &self.last_index_for_tile,
+                0,
+                self.last_index_for_tile.size(),
+            );
         }
     }
 
@@ -285,7 +286,7 @@ mod tests {
     use log::{log_enabled, Level};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc};
-    use wgpu::{CommandEncoder, Device};
+    use wgpu::{CommandEncoder, Device, COPY_BYTES_PER_ROW_ALIGNMENT};
 
     use super::TextureUpdateByCoords;
 
@@ -308,13 +309,35 @@ mod tests {
             let mut controller = TextureUpdateByCoords::new(&device, meta.clone());
             callback(&device, &mut encoder, &mut controller);
 
+            queue.submit(Some(encoder.finish()));
+
+            let buffer = Self::texture_to_buffer(
+                &device,
+                &queue,
+                &controller.texture,
+                controller.texture_extent,
+            );
+            Self::save_debug_image(test_name, &buffer);
+            buffer
+        }
+
+        pub fn save_debug_image(test_name: &str, buffer: &ImageBuffer<Rgba<u8>, Vec<u8>>) {
+            env_logger::try_init().ok();
+
+            if log_enabled!(Level::Debug) {
+                buffer.save(format!("{}.png", test_name)).unwrap();
+            }
+        }
+
+        pub fn texture_to_buffer(
+            device: &Device,
+            queue: &wgpu::Queue,
+            texture: &wgpu::Texture,
+            texture_extent: wgpu::Extent3d,
+        ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
             let u32_size = std::mem::size_of::<u32>() as u32;
-
-            let texture_size = meta.get_largest_canvas_size().unwrap();
-
-            let output_buffer_size =
-                (u32_size * texture_size.width as u32 * texture_size.height as u32)
-                    as wgpu::BufferAddress;
+            let output_buffer_size = (u32_size * texture_extent.width * texture_extent.height * 8)
+                as wgpu::BufferAddress;
             let output_buffer_desc = wgpu::BufferDescriptor {
                 size: output_buffer_size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -323,10 +346,17 @@ mod tests {
             };
             let output_buffer = device.create_buffer(&output_buffer_desc);
 
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+            let bytes_per_row = (u32_size * texture_extent.width)
+                + (COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+                & !(COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+
             encoder.copy_texture_to_buffer(
                 wgpu::ImageCopyTexture {
                     aspect: wgpu::TextureAspect::All,
-                    texture: &controller.texture,
+                    texture: &texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                 },
@@ -334,11 +364,11 @@ mod tests {
                     buffer: &output_buffer,
                     layout: wgpu::ImageDataLayout {
                         offset: 0,
-                        bytes_per_row: NonZeroU32::new(u32_size * texture_size.width as u32),
-                        rows_per_image: NonZeroU32::new(texture_size.height as u32),
+                        bytes_per_row: NonZeroU32::new(bytes_per_row),
+                        rows_per_image: NonZeroU32::new(texture_extent.height),
                     },
                 },
-                controller.texture_extent,
+                texture_extent,
             );
 
             queue.submit(Some(encoder.finish()));
@@ -352,21 +382,28 @@ mod tests {
             device.poll(wgpu::Maintain::Wait);
             rx.recv().unwrap().unwrap();
 
-            let data = buffer_slice.get_mapped_range();
+            let mut data = buffer_slice.get_mapped_range().to_vec();
+
+            // Repack buffer if bytes_per_row is not equal to width
+            if bytes_per_row != texture_extent.width * u32_size {
+                let mut repacked_data = Vec::with_capacity(
+                    (texture_extent.width * texture_extent.height * u32_size) as usize,
+                );
+                for row in 0..texture_extent.height {
+                    let row_start = (row * bytes_per_row) as usize;
+                    let row_end = row_start + (texture_extent.width * u32_size) as usize;
+                    repacked_data.extend_from_slice(&data[row_start..row_end]);
+                }
+                data = repacked_data;
+            }
 
             let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(
-                texture_size.width as u32,
-                texture_size.height as u32,
+                texture_extent.width,
+                texture_extent.height,
                 // copy data to avoid dealing with lifetimes
                 data.to_vec(),
             )
             .unwrap();
-
-            env_logger::try_init().ok();
-
-            if log_enabled!(Level::Debug) {
-                buffer.save(format!("{}.png", test_name)).unwrap();
-            }
 
             buffer
         }
@@ -405,7 +442,7 @@ mod tests {
         let mut color_id_to_tuple = BTreeMap::new();
         color_id_to_tuple.insert(0, [0, 0, 0, 255]);
 
-        let texture_size: u32 = 64;
+        let texture_size: u32 = 65;
 
         let meta = Meta {
             chunk_descs: vec![],
@@ -789,16 +826,22 @@ mod tests {
     #[test]
     fn fuzz() {
         let mut color_id_to_tuple = BTreeMap::new();
-        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
-        color_id_to_tuple.insert(1, [255, 0, 0, 255]);
-        color_id_to_tuple.insert(2, [0, 255, 0, 255]);
-        color_id_to_tuple.insert(3, [0, 0, 255, 255]);
-        color_id_to_tuple.insert(4, [255, 255, 0, 255]);
-        color_id_to_tuple.insert(5, [255, 0, 255, 255]);
-        color_id_to_tuple.insert(6, [0, 255, 255, 255]);
-        color_id_to_tuple.insert(7, [255, 255, 255, 255]);
 
-        let texture_size: u32 = 64;
+        let mut generator = rand::thread_rng();
+
+        for i in 0..128 {
+            color_id_to_tuple.insert(
+                i,
+                [
+                    generator.gen_range(0..255),
+                    generator.gen_range(0..255),
+                    generator.gen_range(0..255),
+                    255,
+                ],
+            );
+        }
+
+        let texture_size: u32 = 2000;
 
         let meta = Meta {
             chunk_descs: vec![],
@@ -812,50 +855,78 @@ mod tests {
         };
 
         let mut expected_texture: Vec<Vec<u8>> =
-            vec![vec![0; texture_size as usize]; texture_size as usize];
+            vec![vec![0xff; texture_size as usize]; texture_size as usize];
 
-        let mut generator = rand::thread_rng();
+        let (device, queue) = TestHelpers::get_device();
+        let mut controller = TextureUpdateByCoords::new(&device, meta);
 
-        let buffer = TestHelpers::render_to_buffer(
-            "fuzz",
-            meta,
-            |device, encoder, controller| {
-                let required_num_of_tile_updates =
-                    TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) * 2;
+        // Reset to clear
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("clear_encoder"),
+        });
 
-                let mut data: Vec<u8> = Vec::new();
+        {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Clear render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &controller.texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+        }
 
-                for _ in 0..required_num_of_tile_updates {
-                    let x = generator.gen_range(0..texture_size);
-                    let y = generator.gen_range(0..texture_size);
+        queue.submit(Some(encoder.finish()));
 
+        for i in 0..100 {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+            let mut data: Vec<u8> = Vec::new();
+            for _ in 0..texture_size {
+                let x = generator.gen_range(0..texture_size);
+                let y = generator.gen_range(0..texture_size);
+
+                for _ in 0..5 {
+                    let color_index = generator.gen_range(0..color_id_to_tuple.len()) as u8;
                     StoredTilePlacement {
                         x: x as u16,
                         y: y as u16,
-                        color_index: 0,
-                        ms_since_epoch: 0,
-                    }
-                    .write_into(&mut data);
-
-                    let color_index = generator.gen_range(0..4);
-                    StoredTilePlacement {
-                        x: x as u16,
-                        y: y as u16,
-                        color_index,
-                        ms_since_epoch: 0,
+                        color_index: color_index,
+                        ms_since_epoch: i,
                     }
                     .write_into(&mut data);
 
                     expected_texture[x as usize][y as usize] = color_index;
                 }
+            }
 
-                controller.update(device, encoder, data);
-            },
+            controller.update(&device, &mut encoder, data);
+            queue.submit(Some(encoder.finish()));
+        }
+
+        let buffer = TestHelpers::texture_to_buffer(
+            &device,
+            &queue,
+            &controller.texture,
+            controller.texture_extent,
         );
+        TestHelpers::save_debug_image("fuzz", &buffer);
 
         // Check generated texture
         for x in 0..texture_size {
             for y in 0..texture_size {
+                let expected_color_key = expected_texture[x as usize][y as usize];
+                if expected_color_key == 0xff {
+                    // This tile wasn't updated, so it should be equal to the color we cleared with
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                    continue;
+                }
+
                 assert_eq!(
                     buffer.get_pixel(x, y),
                     &Rgba(
