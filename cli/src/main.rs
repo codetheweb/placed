@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 use colors_transform::Color;
 use std::fs::File;
 
+// todo: use https://github.com/emersonford/tracing-indicatif for automatic progress bars?
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
