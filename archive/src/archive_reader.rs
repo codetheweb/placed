@@ -103,7 +103,7 @@ impl<'a, R: Read + Seek> Seek for PlacedArchiveReader<'a, R> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         match pos {
             std::io::SeekFrom::Start(pos) => {
-                let mut current_tile_chunk_id = 0;
+                let mut new_current_tile_chunk_id = 0;
                 let mut current_tile_offset = 0;
 
                 let pos_in_tiles = pos / StoredTilePlacement::encoded_size() as u64;
@@ -113,21 +113,25 @@ impl<'a, R: Read + Seek> Seek for PlacedArchiveReader<'a, R> {
                         break;
                     }
 
-                    current_tile_chunk_id += 1;
+                    new_current_tile_chunk_id += 1;
                     current_tile_offset += chunk_desc.num_tiles as u64;
                 }
 
-                match self.load_chunk_by_id(current_tile_chunk_id) {
-                    Ok(_) => {
-                        self.current_tile_chunk_id = Some(current_tile_chunk_id);
-                    }
-                    Err(_) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Could not load chunk",
-                        ));
-                    }
-                };
+                if self.current_tile_chunk_id != Some(new_current_tile_chunk_id)
+                    || self.current_tile_chunk_data.is_none()
+                {
+                    match self.load_chunk_by_id(new_current_tile_chunk_id) {
+                        Ok(_) => {
+                            self.current_tile_chunk_id = Some(new_current_tile_chunk_id);
+                        }
+                        Err(_) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Could not load chunk",
+                            ));
+                        }
+                    };
+                }
 
                 let remaining_pos = pos % StoredTilePlacement::encoded_size() as u64
                     + (pos_in_tiles - current_tile_offset)
