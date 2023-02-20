@@ -37,9 +37,7 @@ impl<R: Read + Seek> Player<R> {
     }
 
     pub fn update(&mut self, dt: Duration) {
-        // let mut buf: Vec<u8> = vec![0u8; StoredTilePlacement::encoded_size() * 4096 * 10];
-        // self.r.read_exact(buf.as_mut_slice()).unwrap();
-        self.rendered_up_to += Duration::from_secs(60); // dt * self.timescale_factor as u32;
+        self.rendered_up_to += dt * self.timescale_factor as u32;
 
         self.render_state
             .update(self.rendered_up_to.as_millis() as u32);
