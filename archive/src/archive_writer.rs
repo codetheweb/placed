@@ -134,8 +134,14 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
         let meta = Meta {
             canvas_size_changes,
             chunk_descs,
-            // todo
-            last_pixel_placed_at_seconds_since_epoch: 0,
+            last_tile_placed_at_ms_since_epoch: self
+                .tile_placements
+                .last()
+                .unwrap()
+                .placed_at
+                .signed_duration_since(first_tile_placed_at)
+                .num_milliseconds() as u32,
+            total_tile_placements: self.tile_placements.len() as u64,
             color_id_to_tuple: BTreeMap::from_iter(
                 self.color_tuple_to_id.iter().map(|(k, v)| (*v, *k)),
             ),

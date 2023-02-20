@@ -2,11 +2,13 @@ use std::{
     io::{Cursor, Read, Seek, SeekFrom, Write},
     num::{NonZeroU32, NonZeroU64},
     sync::mpsc,
+    time::Duration,
     vec,
 };
 
 use archive::structures::{Meta, StoredTilePlacement};
-use wgpu::util::DeviceExt;
+use num::integer::lcm;
+use wgpu::{util::DeviceExt, COPY_BUFFER_ALIGNMENT};
 
 #[derive(Debug)]
 pub enum PartialUpdateResult {
@@ -21,8 +23,37 @@ pub enum PartialUpdateResult {
 struct Helpers {}
 
 impl Helpers {
+    /// Returns the maximum number of tiles that can be processed in a single chunk.
+    /// Not guaranteed to meet alignment requirements.
     fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> u32 {
         device.limits().max_compute_workgroups_per_dimension * NUM_OF_TILES_PER_WORKGROUP
+    }
+
+    fn get_max_input_size(device: &wgpu::Device) -> u64 {
+        let absolute_max_in_bytes = device.limits().max_buffer_size.min(
+            Helpers::get_max_num_of_tiles_per_chunk(device) as u64
+                * StoredTilePlacement::encoded_size() as u64,
+        );
+
+        let max_in_bytes =
+            absolute_max_in_bytes - (absolute_max_in_bytes % Helpers::get_alignment_factor());
+
+        max_in_bytes
+    }
+
+    fn get_aligned_input_size(device: &wgpu::Device, min_size_in_bytes: u64) -> u64 {
+        let min_in_bytes = min_size_in_bytes
+            + (Helpers::get_alignment_factor()
+                - (min_size_in_bytes % Helpers::get_alignment_factor()));
+
+        min_in_bytes.min(Helpers::get_max_input_size(device))
+    }
+
+    fn get_alignment_factor() -> u64 {
+        lcm(
+            StoredTilePlacement::encoded_size() as u64 * NUM_OF_TILES_PER_WORKGROUP as u64,
+            COPY_BUFFER_ALIGNMENT as u64,
+        )
     }
 }
 
@@ -36,6 +67,7 @@ struct ComputedBounds {
 
 pub struct TextureUpdateByCoords<R> {
     reader: R,
+    meta: Meta,
     texture: wgpu::Texture,
     texture_extent: wgpu::Extent3d,
     pub texture_view: wgpu::TextureView,
@@ -52,8 +84,6 @@ pub struct TextureUpdateByCoords<R> {
 }
 
 const NUM_OF_TILES_PER_WORKGROUP: u32 = 4;
-
-const DEFAULT_CHUNK_SIZE: u32 = 9 * NUM_OF_TILES_PER_WORKGROUP * 2048 * 2;
 
 // todo: add note about assuming sorted input
 
@@ -78,9 +108,6 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
                 entry_point: "update_texture",
             });
 
-        let max_input_size = Helpers::get_max_num_of_tiles_per_chunk(&device)
-            * (StoredTilePlacement::encoded_size() as u32);
-
         let bounds_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords bounds buffer"),
             contents: bytemuck::cast_slice(&[0u32; 4]),
@@ -97,7 +124,12 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
-            contents: bytemuck::cast_slice(&vec![0u32; max_input_size.try_into().unwrap()]),
+            contents: bytemuck::cast_slice(&vec![
+                0u8;
+                Helpers::get_max_input_size(device)
+                    .try_into()
+                    .unwrap()
+            ]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -226,6 +258,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
 
         Self {
             reader,
+            meta,
             bounds_buffer,
             input_buffer,
             texture,
@@ -239,20 +272,22 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
             last_index_for_tile,
             staging_buffer,
             // todo: use correct chunk size
-            staging_belt: wgpu::util::StagingBelt::new(max_input_size.into()),
+            staging_belt: wgpu::util::StagingBelt::new(Helpers::get_max_input_size(device) as u64),
         }
     }
 
     /// Make sure to only pass one tile per position, as it's not guaranteed that the order of tiles will be preserved during rendering.
     /// todo: add note about calling only once per frame
+    /// `duration` is used as a performance hint.
     pub fn update(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         up_to_ms: u32,
+        duration: Duration,
     ) -> PartialUpdateResult {
         loop {
-            match self.partial_update(device, queue, up_to_ms) {
+            match self.partial_update(device, queue, up_to_ms, duration) {
                 PartialUpdateResult::ReachedEndOfInput => {
                     return PartialUpdateResult::ReachedEndOfInput;
                 }
@@ -276,6 +311,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         up_to_ms: u32,
+        duration: Duration,
     ) -> PartialUpdateResult {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("texture_update_by_coords encoder"),
@@ -295,7 +331,9 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
             bytemuck::cast_slice_mut::<u8, u32>(&mut bounds_mut)[3] = 0;
         }
 
-        let bytes_written = self.write_next_input_chunk(&mut encoder, device).unwrap();
+        let bytes_written = self
+            .write_next_input_chunk(&mut encoder, device, duration)
+            .unwrap();
         self.staging_belt.finish();
 
         if bytes_written == 0 {
@@ -353,7 +391,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         if bounds.max_index_in_chunk_used != (num_of_tiles as u32 - 1) {
             self.reader
                 .seek(SeekFrom::Current(
-                    -((num_of_tiles as u32 - bounds.max_index_in_chunk_used) as i64
+                    -((num_of_tiles as i64 - bounds.max_index_in_chunk_used as i64)
                         * StoredTilePlacement::encoded_size() as i64),
                 ))
                 .unwrap();
@@ -369,36 +407,41 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         device: &wgpu::Device,
+        duration: Duration,
     ) -> std::io::Result<usize> {
+        let estimated_num_of_tiles = self.get_estimated_num_of_tiles_for_duration(duration);
+        let copy_size = Helpers::get_aligned_input_size(
+            device,
+            estimated_num_of_tiles
+                .checked_mul(StoredTilePlacement::encoded_size() as u64)
+                .unwrap_or(Helpers::get_max_input_size(device)),
+        );
+
         let mut s = self.staging_belt.write_buffer(
             encoder,
             &self.input_buffer,
             0,
-            NonZeroU64::new(DEFAULT_CHUNK_SIZE.into()).unwrap(),
+            NonZeroU64::new(copy_size).unwrap(),
             device,
         );
 
-        let mut writer = Cursor::new(s.as_mut());
+        let mut tracked_writer = Cursor::new(s.as_mut());
 
         // todo: handle errors
-        let mut buff = Vec::new();
-        match self
-            .reader
-            .by_ref()
-            .take(DEFAULT_CHUNK_SIZE.into())
-            .read_to_end(&mut buff)
-        {
+        match std::io::copy(
+            &mut self.reader.by_ref().take(copy_size),
+            &mut tracked_writer,
+        ) {
             Ok(num_written) => {
                 if num_written == 0 {
                     return Ok(0);
                 }
 
-                writer.write_all(&buff).unwrap();
-
                 let mut padding_count = 0;
                 // Pad
                 while (num_written + padding_count)
                     % ((NUM_OF_TILES_PER_WORKGROUP as usize) * StoredTilePlacement::encoded_size())
+                        as u64
                     != 0
                 {
                     StoredTilePlacement {
@@ -407,12 +450,12 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
                         color_index: 255,
                         ms_since_epoch: 0,
                     }
-                    .write_into(&mut writer);
+                    .write_into(&mut tracked_writer);
 
-                    padding_count += StoredTilePlacement::encoded_size();
+                    padding_count += StoredTilePlacement::encoded_size() as u64;
                 }
 
-                Ok(num_written)
+                Ok(num_written as usize)
             }
             Err(err) => Err(err),
         }
@@ -441,6 +484,17 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
 
         return bounds;
     }
+
+    fn get_estimated_num_of_tiles_for_duration(&self, duration: Duration) -> u64 {
+        let average_tiles_placed_per_ms = self.meta.total_tile_placements as f64
+            // Add 1 to prevent division by 0
+            / (self.meta.last_tile_placed_at_ms_since_epoch as f64 + 1.0);
+
+        let estimated_num_of_tiles =
+            (average_tiles_placed_per_ms * duration.as_millis() as f64) as u64;
+
+        return estimated_num_of_tiles;
+    }
 }
 
 #[cfg(test)]
@@ -454,12 +508,13 @@ mod tests {
         io::Cursor,
         num::NonZeroU32,
         sync::mpsc::{self},
+        time::Duration,
     };
     use wgpu::{Device, COPY_BYTES_PER_ROW_ALIGNMENT};
 
     use crate::texture_update_by_coords::PartialUpdateResult;
 
-    use super::{TextureUpdateByCoords, DEFAULT_CHUNK_SIZE};
+    use super::TextureUpdateByCoords;
 
     struct TestHelpers {}
 
@@ -474,7 +529,7 @@ mod tests {
 
             let mut controller =
                 TextureUpdateByCoords::new(&device, meta.clone(), Cursor::new(data));
-            controller.update(&device, &queue, up_to_ms);
+            controller.update(&device, &queue, up_to_ms, Duration::from_secs(100));
 
             let buffer = Self::texture_to_buffer(
                 &device,
@@ -609,17 +664,6 @@ mod tests {
 
         let texture_size: u32 = 65;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         // Every other row with black
@@ -639,6 +683,18 @@ mod tests {
                 tile.write_into(&mut data);
             }
         }
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
 
         let buffer = TestHelpers::render_to_buffer("black_rows", meta, data, 0);
 
@@ -661,17 +717,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         // Fill with red
@@ -687,6 +732,18 @@ mod tests {
                 tile.write_into(&mut data);
             }
         }
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
 
         let buffer = TestHelpers::render_to_buffer("red_square", meta, data, 0);
 
@@ -705,17 +762,6 @@ mod tests {
         color_id_to_tuple.insert(1, [0, 255, 0, 255]);
 
         let texture_size: u32 = 64;
-
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
 
         let mut data: Vec<u8> = Vec::new();
 
@@ -747,6 +793,18 @@ mod tests {
             }
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 2,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
         let buffer = TestHelpers::render_to_buffer("ignores_future_tile_placements", meta, data, 1);
 
         // Check generated texture
@@ -764,17 +822,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         StoredTilePlacement {
@@ -784,6 +831,18 @@ mod tests {
             ms_since_epoch: 0,
         }
         .write_into(&mut data);
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
 
         let buffer = TestHelpers::render_to_buffer("single_pixel", meta, data, 0);
 
@@ -808,17 +867,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         for x in 0..texture_size {
@@ -833,6 +881,18 @@ mod tests {
                 tile.write_into(&mut data);
             }
         }
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
 
         let buffer = TestHelpers::render_to_buffer("multi_color", meta, data, 0);
 
@@ -858,17 +918,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         for i in 0..7 {
@@ -880,6 +929,18 @@ mod tests {
             }
             .write_into(&mut data);
         }
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
 
         let buffer = TestHelpers::render_to_buffer("odd_number_of_tiles", meta, data, 0);
 
@@ -903,17 +964,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         for x in 0..texture_size {
@@ -936,6 +986,18 @@ mod tests {
             }
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
         let buffer =
             TestHelpers::render_to_buffer("preserves_order_of_tiles_in_chunk", meta, data, 0);
 
@@ -948,6 +1010,7 @@ mod tests {
     }
 
     #[test]
+    // todo: fix test with new dynamic chunking
     fn multiple_chunks() {
         let mut color_id_to_tuple = BTreeMap::new();
         color_id_to_tuple.insert(0, [0, 0, 0, 255]);
@@ -955,20 +1018,9 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple: color_id_to_tuple.clone(),
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut expected_color_index = 0;
 
-        let required_num_of_tile_updates = DEFAULT_CHUNK_SIZE * 2;
+        let required_num_of_tile_updates = 2048 * 2;
         let required_num_of_full_texture_refreshes =
             required_num_of_tile_updates / (texture_size * texture_size);
 
@@ -1006,6 +1058,18 @@ mod tests {
             }
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple: color_id_to_tuple.clone(),
+            last_tile_placed_at_ms_since_epoch: 0,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
         let buffer = TestHelpers::render_to_buffer("multiple_chunks", meta, data, 0);
 
         // Check generated texture
@@ -1037,21 +1101,8 @@ mod tests {
 
         let texture_size: u32 = 2000;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple: color_id_to_tuple.clone(),
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut expected_texture: Vec<Vec<u8>> =
             vec![vec![0xff; texture_size as usize]; texture_size as usize];
-
-        let (device, queue) = TestHelpers::get_device();
 
         let mut data = Vec::new();
 
@@ -1075,6 +1126,19 @@ mod tests {
             }
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple: color_id_to_tuple.clone(),
+            last_tile_placed_at_ms_since_epoch: 99,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let (device, queue) = TestHelpers::get_device();
         let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
 
         // Reset to clear
@@ -1100,7 +1164,7 @@ mod tests {
         queue.submit(Some(encoder.finish()));
 
         // Render tile updates
-        controller.update(&device, &queue, 1_000_000_000);
+        controller.update(&device, &queue, 1_000_000_000, Duration::from_secs(1_000));
 
         let buffer = TestHelpers::texture_to_buffer(
             &device,
@@ -1139,17 +1203,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         for i in 0..texture_size {
@@ -1165,10 +1218,22 @@ mod tests {
             }
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: texture_size - 1,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
         let (device, queue) = TestHelpers::get_device();
         let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
 
-        let result = controller.update(&device, &queue, 20);
+        let result = controller.update(&device, &queue, 20, Duration::from_secs(1_000));
         assert!(matches!(
             result,
             PartialUpdateResult::UpdatedUpToMs {
@@ -1194,7 +1259,7 @@ mod tests {
             }
         }
 
-        let result = controller.update(&device, &queue, 32);
+        let result = controller.update(&device, &queue, 32, Duration::MAX);
         assert!(matches!(
             result,
             PartialUpdateResult::UpdatedUpToMs {
@@ -1220,7 +1285,7 @@ mod tests {
             }
         }
 
-        let result = controller.update(&device, &queue, texture_size);
+        let result = controller.update(&device, &queue, texture_size, Duration::MAX);
         assert!(matches!(result, PartialUpdateResult::ReachedEndOfInput));
 
         let buffer = TestHelpers::texture_to_buffer(
@@ -1248,17 +1313,6 @@ mod tests {
 
         let texture_size: u32 = 64;
 
-        let meta = Meta {
-            chunk_descs: vec![],
-            color_id_to_tuple,
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            canvas_size_changes: vec![CanvasSizeChange {
-                width: texture_size as u16,
-                height: texture_size as u16,
-                ms_since_epoch: 0,
-            }],
-        };
-
         let mut data: Vec<u8> = Vec::new();
 
         for i in 0..texture_size {
@@ -1276,10 +1330,22 @@ mod tests {
             tile.write_into(&mut data);
         }
 
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_tile_placed_at_ms_since_epoch: texture_size - 1,
+            total_tile_placements: data.len() as u64 / StoredTilePlacement::encoded_size() as u64,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
         let (device, queue) = TestHelpers::get_device();
         let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
 
-        let result = controller.update(&device, &queue, 20);
+        let result = controller.update(&device, &queue, 20, Duration::MAX);
         // There's no tile placement at 20ms (20 % 2 == 0) so it should have updated up to 19ms
         assert!(matches!(
             result,

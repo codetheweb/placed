@@ -1,4 +1,7 @@
-use std::io::{Read, Seek};
+use std::{
+    io::{Read, Seek},
+    time::Duration,
+};
 
 use crate::{
     renderers::{ScalingRenderer, SurfaceSize},
@@ -18,6 +21,7 @@ pub struct PixelArtDisplayState<R> {
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
     scaling_renderer: ScalingRenderer,
     compute_renderer: TextureUpdateByCoords<R>,
+    last_up_to_ms: u32,
     up_to_ms: u32,
 
     current_scale_factor: f32,
@@ -101,6 +105,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             queue,
             scaling_renderer,
             compute_renderer,
+            last_up_to_ms: 0,
             up_to_ms: 0,
             current_scale_factor: 1.0,
             current_x_offset: 0.0,
@@ -110,10 +115,13 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
     }
 
     pub fn update(&mut self, up_to_ms: u32) {
+        self.last_up_to_ms = self.up_to_ms;
         self.up_to_ms = up_to_ms;
 
+        let diff = Duration::from_millis((self.up_to_ms - self.last_up_to_ms).into());
+
         self.compute_renderer
-            .update(&self.device, &self.queue, self.up_to_ms);
+            .update(&self.device, &self.queue, self.up_to_ms, diff);
     }
 
     pub fn render(&mut self) {

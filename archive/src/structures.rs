@@ -61,7 +61,8 @@ pub struct ChunkDescription {
 #[derive(Encode, Decode, PartialEq, Eq, Debug, Clone)]
 pub struct Meta {
     pub canvas_size_changes: Vec<CanvasSizeChange>,
-    pub last_pixel_placed_at_seconds_since_epoch: u32,
+    pub total_tile_placements: u64,
+    pub last_tile_placed_at_ms_since_epoch: u32,
     /// rgba
     pub color_id_to_tuple: BTreeMap<u8, [u8; 4]>,
     pub chunk_descs: Vec<ChunkDescription>,
