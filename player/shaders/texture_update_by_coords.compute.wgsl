@@ -18,10 +18,18 @@ struct Locals {
   height: u32,
 };
 
+struct BoundsInChunk {
+  requested_up_to_ms_since_epoch: u32,
+  max_ms_since_epoch_seen: atomic<u32>,
+  max_ms_since_epoch_used: atomic<u32>,
+  max_index_in_chunk_used: atomic<u32>,
+}
+
 @group(0) @binding(0) var<storage, read> tile_updates : array<FourTileUpdate>;
 @group(0) @binding(1) var<uniform> r_locals : Locals;
 @group(0) @binding(2) var<storage, read_write> last_index_for_tile : array<atomic<u32>>;
-@group(0) @binding(3) var texture_out : texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<storage, read_write> bounds : BoundsInChunk;
+@group(0) @binding(4) var texture_out : texture_storage_2d<rgba8unorm, write>;
 
 fn readU8(i: u32, current_offset: u32) -> u32 {
 	var ipos : u32 = current_offset / 4u;
@@ -40,6 +48,14 @@ fn readU16(i: u32, current_offset: u32) -> u32 {
   return value;
 }
 
+fn readU32(i: u32, current_offset: u32) -> u32 {
+  var first = readU16(i, current_offset);
+  var second = readU16(i, current_offset + 2u);
+  var value = first | (second << 16u);
+
+  return value;
+}
+
 fn readTile(four_tile_offset: u32, offset_in_four_tiles: u32) -> DecodedTileUpdate {
   var current_offset = offset_in_four_tiles * SIZE_OF_COORDINATE_UPDATE_BYTES;
 
@@ -50,6 +66,8 @@ fn readTile(four_tile_offset: u32, offset_in_four_tiles: u32) -> DecodedTileUpda
   tile.y = readU16(four_tile_offset, current_offset);
   current_offset += 2u;
   tile.color_index = readU8(four_tile_offset, current_offset);
+  current_offset += 1u;
+  tile.ms_since_epoch = readU32(four_tile_offset, current_offset);
 
   return tile;
 }
@@ -76,6 +94,14 @@ fn calculate_final_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
+  atomicMax(&bounds.max_ms_since_epoch_seen, tile.ms_since_epoch);
+
+  if (tile.ms_since_epoch > bounds.requested_up_to_ms_since_epoch) {
+    return;
+  }
+
+  atomicMax(&bounds.max_ms_since_epoch_used, tile.ms_since_epoch);
+  atomicMax(&bounds.max_index_in_chunk_used, getDataIndexForInvocation(id));
   atomicMax(&last_index_for_tile[getTileIndex(tile)], getDataIndexForInvocation(id));
 }
 
@@ -90,6 +116,10 @@ fn update_texture(@builtin(global_invocation_id) id: vec3<u32>) {
 
   if (tile.color_index == 255u) {
     // This update is just padding
+    return;
+  }
+
+  if (tile.ms_since_epoch > bounds.requested_up_to_ms_since_epoch) {
     return;
   }
 

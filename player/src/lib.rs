@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, Read},
+    io::{BufReader, Cursor, Read, Seek},
     time::Duration,
 };
 
@@ -18,32 +18,31 @@ mod pixel_art_display_state;
 mod renderers;
 mod texture_update_by_coords;
 
-struct Player<'a> {
+struct Player<R> {
     rendered_up_to: Duration,
-    r: BufReader<PlacedArchiveReader<'a, File>>,
-    render_state: pixel_art_display_state::PixelArtDisplayState,
+    render_state: pixel_art_display_state::PixelArtDisplayState<R>,
     timescale_factor: f32,
 }
 
-impl<'a> Player<'a> {
+impl<R: Read + Seek> Player<R> {
     pub fn new(
-        r: PlacedArchiveReader<'a, File>,
-        render_state: pixel_art_display_state::PixelArtDisplayState,
+        render_state: pixel_art_display_state::PixelArtDisplayState<R>,
         timescale_factor: f32,
     ) -> Self {
         Self {
             rendered_up_to: Duration::ZERO,
-            r: BufReader::new(r),
             render_state,
             timescale_factor,
         }
     }
 
     pub fn update(&mut self, dt: Duration) {
-        let mut buf: Vec<u8> = vec![0u8; StoredTilePlacement::encoded_size() * 4096 * 10];
-        self.r.read_exact(buf.as_mut_slice()).unwrap();
+        // let mut buf: Vec<u8> = vec![0u8; StoredTilePlacement::encoded_size() * 4096 * 10];
+        // self.r.read_exact(buf.as_mut_slice()).unwrap();
+        self.rendered_up_to += Duration::from_secs(60); // dt * self.timescale_factor as u32;
 
-        self.render_state.update(buf);
+        self.render_state
+            .update(self.rendered_up_to.as_millis() as u32);
     }
 
     pub fn draw(&mut self) {
@@ -95,26 +94,26 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
     let reader = PlacedArchiveReader::new(file).expect("Failed to create reader");
 
     let mut state =
-        pixel_art_display_state::PixelArtDisplayState::new(&window, reader.meta.clone());
+        pixel_art_display_state::PixelArtDisplayState::new(&window, reader.meta.clone(), reader);
     state.clear(wgpu::Color::WHITE);
-    let p = Player::new(reader, state, timescale_factor);
+    let p = Player::new(state, timescale_factor);
 
     game_loop(
         event_loop,
         window,
         p,
         FPS as u32,
-        0.1,
+        2.0,
         move |g| {
             g.game.update(TIME_STEP);
         },
         move |g| {
             g.game.draw();
 
-            let dt = TIME_STEP.as_secs_f64() - Time::now().sub(&g.current_instant());
-            if dt > 0.0 {
-                std::thread::sleep(Duration::from_secs_f64(dt));
-            }
+            // let dt = TIME_STEP.as_secs_f64() - Time::now().sub(&g.current_instant());
+            // if dt > 0.0 {
+            //     std::thread::sleep(Duration::from_secs_f64(dt));
+            // }
         },
         move |g, event| {
             if input.update(event) {

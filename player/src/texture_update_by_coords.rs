@@ -1,17 +1,45 @@
 use std::{
-    cmp::min,
-    mem::size_of,
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     num::{NonZeroU32, NonZeroU64},
+    sync::mpsc,
     vec,
 };
 
 use archive::structures::{Meta, StoredTilePlacement};
 use wgpu::util::DeviceExt;
 
-pub struct TextureUpdateByCoords {
+#[derive(Debug)]
+pub enum PartialUpdateResult {
+    ReachedEndOfInput,
+    UpdatedUpToMs {
+        max_ms_since_epoch_used: u32,
+        // todo: rename?
+        did_update_up_to_requested_ms: bool,
+    },
+}
+
+struct Helpers {}
+
+impl Helpers {
+    fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> u32 {
+        device.limits().max_compute_workgroups_per_dimension * NUM_OF_TILES_PER_WORKGROUP
+    }
+}
+
+#[derive(Debug)]
+struct ComputedBounds {
+    requested_up_to_ms_since_epoch: u32,
+    max_ms_since_epoch_seen: u32,
+    max_ms_since_epoch_used: u32,
+    max_index_in_chunk_used: u32,
+}
+
+pub struct TextureUpdateByCoords<R> {
+    reader: R,
     texture: wgpu::Texture,
     texture_extent: wgpu::Extent3d,
     pub texture_view: wgpu::TextureView,
+    bounds_buffer: wgpu::Buffer,
     input_buffer: wgpu::Buffer,
     zeros_buffer: wgpu::Buffer,
     calculate_final_tiles_pipeline: wgpu::ComputePipeline,
@@ -19,15 +47,18 @@ pub struct TextureUpdateByCoords {
     update_texture_pipeline: wgpu::ComputePipeline,
     update_texture_bind_group: wgpu::BindGroup,
     last_index_for_tile: wgpu::Buffer,
+    staging_buffer: wgpu::Buffer,
     staging_belt: wgpu::util::StagingBelt,
 }
 
 const NUM_OF_TILES_PER_WORKGROUP: u32 = 4;
 
+const DEFAULT_CHUNK_SIZE: u32 = 9 * NUM_OF_TILES_PER_WORKGROUP * 2048 * 2;
+
 // todo: add note about assuming sorted input
 
-impl TextureUpdateByCoords {
-    pub fn new(device: &wgpu::Device, meta: Meta) -> Self {
+impl<R: Read + Seek> TextureUpdateByCoords<R> {
+    pub fn new(device: &wgpu::Device, meta: Meta, reader: R) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/texture_update_by_coords.compute.wgsl");
         let module = device.create_shader_module(shader);
 
@@ -47,8 +78,22 @@ impl TextureUpdateByCoords {
                 entry_point: "update_texture",
             });
 
-        let max_input_size = TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(&device)
+        let max_input_size = Helpers::get_max_num_of_tiles_per_chunk(&device)
             * (StoredTilePlacement::encoded_size() as u32);
+
+        let bounds_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("texture_update_by_coords bounds buffer"),
+            contents: bytemuck::cast_slice(&[0u32; 4]),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        });
+
+        let staging_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("texture_update_by_coords staging buffer"),
+            contents: bytemuck::cast_slice(&[0u32; 4]),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        });
 
         let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_update_by_coords input buffer"),
@@ -144,6 +189,10 @@ impl TextureUpdateByCoords {
                         binding: 2,
                         resource: last_index_for_tile.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: bounds_buffer.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -166,12 +215,18 @@ impl TextureUpdateByCoords {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: bounds_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::TextureView(&some_view),
                 },
             ],
         });
 
         Self {
+            reader,
+            bounds_buffer,
             input_buffer,
             texture,
             texture_extent,
@@ -182,6 +237,7 @@ impl TextureUpdateByCoords {
             update_texture_bind_group,
             zeros_buffer,
             last_index_for_tile,
+            staging_buffer,
             // todo: use correct chunk size
             staging_belt: wgpu::util::StagingBelt::new(max_input_size.into()),
         }
@@ -192,90 +248,198 @@ impl TextureUpdateByCoords {
     pub fn update(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        chunk: Vec<u8>,
-    ) {
-        self.staging_belt.recall();
-
-        let num_of_tiles = chunk.len() / StoredTilePlacement::encoded_size();
-
-        let mut current_tile_offset = 0;
-        while current_tile_offset < num_of_tiles {
-            let next_tile_offset = min(
-                current_tile_offset
-                    + (TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) as usize),
-                num_of_tiles,
-            );
-            let current = &chunk[(current_tile_offset * StoredTilePlacement::encoded_size())
-                ..(next_tile_offset * StoredTilePlacement::encoded_size())];
-
-            // Pad
-            let mut current = current.to_vec();
-            while current.len()
-                % ((NUM_OF_TILES_PER_WORKGROUP as usize) * StoredTilePlacement::encoded_size())
-                != 0
-            {
-                StoredTilePlacement {
-                    x: 0,
-                    y: 0,
-                    color_index: 255,
-                    ms_since_epoch: 0,
+        queue: &wgpu::Queue,
+        up_to_ms: u32,
+    ) -> PartialUpdateResult {
+        loop {
+            match self.partial_update(device, queue, up_to_ms) {
+                PartialUpdateResult::ReachedEndOfInput => {
+                    return PartialUpdateResult::ReachedEndOfInput;
                 }
-                .write_into(&mut current);
+                PartialUpdateResult::UpdatedUpToMs {
+                    max_ms_since_epoch_used,
+                    did_update_up_to_requested_ms,
+                } => {
+                    if did_update_up_to_requested_ms {
+                        return PartialUpdateResult::UpdatedUpToMs {
+                            max_ms_since_epoch_used,
+                            did_update_up_to_requested_ms,
+                        };
+                    }
+                }
             }
-
-            {
-                let mut s = self.staging_belt.write_buffer(
-                    encoder,
-                    &self.input_buffer,
-                    0,
-                    NonZeroU64::new(current.len() as u64).unwrap(),
-                    device,
-                );
-                s.copy_from_slice(&current);
-            }
-
-            self.staging_belt.finish();
-
-            let num_of_workgroups = f32::ceil(
-                (next_tile_offset - current_tile_offset) as f32 / NUM_OF_TILES_PER_WORKGROUP as f32,
-            ) as u32;
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("texture_update_by_coords.calculate_final_tiles compute pass"),
-                });
-                cpass.set_pipeline(&self.calculate_final_tiles_pipeline);
-                cpass.set_bind_group(0, &self.calculate_final_tiles_bind_group, &[]);
-
-                cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
-            }
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("texture_update_by_coords.update_texture compute pass"),
-                });
-                cpass.set_pipeline(&self.update_texture_pipeline);
-                cpass.set_bind_group(0, &self.update_texture_bind_group, &[]);
-
-                cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
-            }
-
-            current_tile_offset = next_tile_offset;
-
-            // Clear state data in preparation for next chunk
-            encoder.copy_buffer_to_buffer(
-                &self.zeros_buffer,
-                0,
-                &self.last_index_for_tile,
-                0,
-                self.last_index_for_tile.size(),
-            );
         }
     }
 
-    fn get_max_num_of_tiles_per_chunk(device: &wgpu::Device) -> u32 {
-        device.limits().max_compute_workgroups_per_dimension * NUM_OF_TILES_PER_WORKGROUP
+    fn partial_update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        up_to_ms: u32,
+    ) -> PartialUpdateResult {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("texture_update_by_coords encoder"),
+        });
+
+        {
+            let mut bounds_mut = self.staging_belt.write_buffer(
+                &mut encoder,
+                &self.bounds_buffer,
+                0,
+                NonZeroU64::new(self.bounds_buffer.size()).unwrap(),
+                device,
+            );
+            bytemuck::cast_slice_mut::<u8, u32>(&mut bounds_mut)[0] = up_to_ms;
+            bytemuck::cast_slice_mut::<u8, u32>(&mut bounds_mut)[1] = 0;
+            bytemuck::cast_slice_mut::<u8, u32>(&mut bounds_mut)[2] = 0;
+            bytemuck::cast_slice_mut::<u8, u32>(&mut bounds_mut)[3] = 0;
+        }
+
+        let bytes_written = self.write_next_input_chunk(&mut encoder, device).unwrap();
+        self.staging_belt.finish();
+
+        if bytes_written == 0 {
+            queue.submit(Some(encoder.finish()));
+            return PartialUpdateResult::ReachedEndOfInput;
+        }
+
+        let num_of_tiles = bytes_written / StoredTilePlacement::encoded_size();
+
+        let num_of_workgroups =
+            f32::ceil(num_of_tiles as f32 / NUM_OF_TILES_PER_WORKGROUP as f32) as u32;
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("texture_update_by_coords.calculate_final_tiles compute pass"),
+            });
+            cpass.set_pipeline(&self.calculate_final_tiles_pipeline);
+            cpass.set_bind_group(0, &self.calculate_final_tiles_bind_group, &[]);
+
+            cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
+        }
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("texture_update_by_coords.update_texture compute pass"),
+            });
+            cpass.set_pipeline(&self.update_texture_pipeline);
+            cpass.set_bind_group(0, &self.update_texture_bind_group, &[]);
+
+            cpass.dispatch_workgroups(num_of_workgroups, NUM_OF_TILES_PER_WORKGROUP, 1);
+        }
+
+        // Clear state data in preparation for next chunk
+        encoder.copy_buffer_to_buffer(
+            &self.zeros_buffer,
+            0,
+            &self.last_index_for_tile,
+            0,
+            self.last_index_for_tile.size(),
+        );
+
+        encoder.copy_buffer_to_buffer(
+            &self.bounds_buffer,
+            0,
+            &self.staging_buffer,
+            0,
+            self.bounds_buffer.size(),
+        );
+
+        queue.submit(Some(encoder.finish()));
+        self.staging_belt.recall();
+
+        let bounds = self.read_computed_bounds(&device);
+
+        if bounds.max_index_in_chunk_used != (num_of_tiles as u32 - 1) {
+            self.reader
+                .seek(SeekFrom::Current(
+                    -((num_of_tiles as u32 - bounds.max_index_in_chunk_used) as i64
+                        * StoredTilePlacement::encoded_size() as i64),
+                ))
+                .unwrap();
+        }
+
+        return PartialUpdateResult::UpdatedUpToMs {
+            max_ms_since_epoch_used: bounds.max_ms_since_epoch_used,
+            did_update_up_to_requested_ms: bounds.max_ms_since_epoch_seen >= up_to_ms,
+        };
+    }
+
+    fn write_next_input_chunk(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+    ) -> std::io::Result<usize> {
+        let mut s = self.staging_belt.write_buffer(
+            encoder,
+            &self.input_buffer,
+            0,
+            NonZeroU64::new(DEFAULT_CHUNK_SIZE.into()).unwrap(),
+            device,
+        );
+
+        let mut writer = Cursor::new(s.as_mut());
+
+        // todo: handle errors
+        let mut buff = Vec::new();
+        match self
+            .reader
+            .by_ref()
+            .take(DEFAULT_CHUNK_SIZE.into())
+            .read_to_end(&mut buff)
+        {
+            Ok(num_written) => {
+                if num_written == 0 {
+                    return Ok(0);
+                }
+
+                writer.write_all(&buff).unwrap();
+
+                let mut padding_count = 0;
+                // Pad
+                while (num_written + padding_count)
+                    % ((NUM_OF_TILES_PER_WORKGROUP as usize) * StoredTilePlacement::encoded_size())
+                    != 0
+                {
+                    StoredTilePlacement {
+                        x: 0,
+                        y: 0,
+                        color_index: 255,
+                        ms_since_epoch: 0,
+                    }
+                    .write_into(&mut writer);
+
+                    padding_count += StoredTilePlacement::encoded_size();
+                }
+
+                Ok(num_written)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn read_computed_bounds(&self, device: &wgpu::Device) -> ComputedBounds {
+        let buffer_slice = self.staging_buffer.slice(..);
+        let (tx, rx) = mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let data = buffer_slice.get_mapped_range();
+        let cast_data = bytemuck::cast_slice::<u8, u32>(&data).to_vec();
+
+        let bounds = ComputedBounds {
+            requested_up_to_ms_since_epoch: cast_data[0],
+            max_ms_since_epoch_seen: cast_data[1],
+            max_ms_since_epoch_used: cast_data[2],
+            max_index_in_chunk_used: cast_data[3],
+        };
+
+        drop(data);
+        self.staging_buffer.unmap();
+
+        return bounds;
     }
 }
 
@@ -285,31 +449,32 @@ mod tests {
     use image::{ImageBuffer, Rgba};
     use log::{log_enabled, Level};
     use rand::Rng;
-    use std::{collections::BTreeMap, num::NonZeroU32, sync::mpsc};
-    use wgpu::{CommandEncoder, Device, COPY_BYTES_PER_ROW_ALIGNMENT};
+    use std::{
+        collections::BTreeMap,
+        io::Cursor,
+        num::NonZeroU32,
+        sync::mpsc::{self},
+    };
+    use wgpu::{Device, COPY_BYTES_PER_ROW_ALIGNMENT};
 
-    use super::TextureUpdateByCoords;
+    use crate::texture_update_by_coords::PartialUpdateResult;
+
+    use super::{TextureUpdateByCoords, DEFAULT_CHUNK_SIZE};
 
     struct TestHelpers {}
 
     impl TestHelpers {
-        pub fn render_to_buffer<F>(
+        pub fn render_to_buffer(
             test_name: &str,
             meta: Meta,
-            callback: F,
-        ) -> ImageBuffer<Rgba<u8>, Vec<u8>>
-        where
-            F: FnOnce(&Device, &mut CommandEncoder, &mut TextureUpdateByCoords),
-        {
+            data: Vec<u8>,
+            up_to_ms: u32,
+        ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
             let (device, queue) = Self::get_device();
 
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-            let mut controller = TextureUpdateByCoords::new(&device, meta.clone());
-            callback(&device, &mut encoder, &mut controller);
-
-            queue.submit(Some(encoder.finish()));
+            let mut controller =
+                TextureUpdateByCoords::new(&device, meta.clone(), Cursor::new(data));
+            controller.update(&device, &queue, up_to_ms);
 
             let buffer = Self::texture_to_buffer(
                 &device,
@@ -475,10 +640,7 @@ mod tests {
             }
         }
 
-        let buffer =
-            TestHelpers::render_to_buffer("black_rows", meta, |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            });
+        let buffer = TestHelpers::render_to_buffer("black_rows", meta, data, 0);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -526,10 +688,66 @@ mod tests {
             }
         }
 
-        let buffer =
-            TestHelpers::render_to_buffer("red_square", meta, |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            });
+        let buffer = TestHelpers::render_to_buffer("red_square", meta, data, 0);
+
+        // Check generated texture
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                assert_eq!(buffer.get_pixel(x, y), &Rgba([255, 0, 0, 255]));
+            }
+        }
+    }
+
+    #[test]
+    fn ignores_future_tile_placements() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [255, 0, 0, 255]);
+        color_id_to_tuple.insert(1, [0, 255, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        // Fill with red
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let tile = StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 0,
+                    ms_since_epoch: 1,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        // Fill with blue in the future
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                let tile = StoredTilePlacement {
+                    x: x as u16,
+                    y: y as u16,
+                    color_index: 1,
+                    ms_since_epoch: 2,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        let buffer = TestHelpers::render_to_buffer("ignores_future_tile_placements", meta, data, 1);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -567,10 +785,7 @@ mod tests {
         }
         .write_into(&mut data);
 
-        let buffer =
-            TestHelpers::render_to_buffer("single_pixel", meta, |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            });
+        let buffer = TestHelpers::render_to_buffer("single_pixel", meta, data, 0);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -619,10 +834,7 @@ mod tests {
             }
         }
 
-        let buffer =
-            TestHelpers::render_to_buffer("multi_color", meta, |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            });
+        let buffer = TestHelpers::render_to_buffer("multi_color", meta, data, 0);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -669,13 +881,7 @@ mod tests {
             .write_into(&mut data);
         }
 
-        let buffer = TestHelpers::render_to_buffer(
-            "odd_number_of_tiles",
-            meta,
-            |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            },
-        );
+        let buffer = TestHelpers::render_to_buffer("odd_number_of_tiles", meta, data, 0);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -730,13 +936,8 @@ mod tests {
             }
         }
 
-        let buffer = TestHelpers::render_to_buffer(
-            "preserves_order_of_tiles_in_chunk",
-            meta,
-            |device, encoder, controller| {
-                controller.update(device, encoder, data);
-            },
-        );
+        let buffer =
+            TestHelpers::render_to_buffer("preserves_order_of_tiles_in_chunk", meta, data, 0);
 
         // Check generated texture
         for x in 0..texture_size {
@@ -767,52 +968,45 @@ mod tests {
 
         let mut expected_color_index = 0;
 
-        let buffer = TestHelpers::render_to_buffer(
-            "multiple_chunks",
-            meta,
-            |device, encoder, controller| {
-                let required_num_of_tile_updates =
-                    TextureUpdateByCoords::get_max_num_of_tiles_per_chunk(device) * 2;
-                let required_num_of_full_texture_refreshes =
-                    required_num_of_tile_updates / (texture_size * texture_size);
+        let required_num_of_tile_updates = DEFAULT_CHUNK_SIZE * 2;
+        let required_num_of_full_texture_refreshes =
+            required_num_of_tile_updates / (texture_size * texture_size);
 
-                let mut data: Vec<u8> = Vec::new();
+        let mut data: Vec<u8> = Vec::new();
 
-                for i in 0..required_num_of_full_texture_refreshes {
-                    if i % 2 == 0 {
-                        for x in 0..texture_size {
-                            for y in 0..texture_size {
-                                StoredTilePlacement {
-                                    x: x as u16,
-                                    y: y as u16,
-                                    color_index: 0,
-                                    ms_since_epoch: 0,
-                                }
-                                .write_into(&mut data);
-                            }
+        for i in 0..required_num_of_full_texture_refreshes {
+            if i % 2 == 0 {
+                for x in 0..texture_size {
+                    for y in 0..texture_size {
+                        StoredTilePlacement {
+                            x: x as u16,
+                            y: y as u16,
+                            color_index: 0,
+                            ms_since_epoch: 0,
                         }
-
-                        expected_color_index = 0;
-                    } else {
-                        for x in (0..texture_size).rev() {
-                            for y in (0..texture_size).rev() {
-                                StoredTilePlacement {
-                                    x: x as u16,
-                                    y: y as u16,
-                                    color_index: 1,
-                                    ms_since_epoch: 0,
-                                }
-                                .write_into(&mut data);
-                            }
-                        }
-
-                        expected_color_index = 1;
+                        .write_into(&mut data);
                     }
                 }
 
-                controller.update(device, encoder, data);
-            },
-        );
+                expected_color_index = 0;
+            } else {
+                for x in (0..texture_size).rev() {
+                    for y in (0..texture_size).rev() {
+                        StoredTilePlacement {
+                            x: x as u16,
+                            y: y as u16,
+                            color_index: 1,
+                            ms_since_epoch: 0,
+                        }
+                        .write_into(&mut data);
+                    }
+                }
+
+                expected_color_index = 1;
+            }
+        }
+
+        let buffer = TestHelpers::render_to_buffer("multiple_chunks", meta, data, 0);
 
         // Check generated texture
         let expected_color = Rgba(*color_id_to_tuple.get(&expected_color_index).unwrap());
@@ -858,7 +1052,30 @@ mod tests {
             vec![vec![0xff; texture_size as usize]; texture_size as usize];
 
         let (device, queue) = TestHelpers::get_device();
-        let mut controller = TextureUpdateByCoords::new(&device, meta);
+
+        let mut data = Vec::new();
+
+        for i in 0..100 {
+            for _ in 0..texture_size {
+                let x = generator.gen_range(0..texture_size);
+                let y = generator.gen_range(0..texture_size);
+
+                for _ in 0..5 {
+                    let color_index = generator.gen_range(0..color_id_to_tuple.len()) as u8;
+                    StoredTilePlacement {
+                        x: x as u16,
+                        y: y as u16,
+                        color_index: color_index,
+                        ms_since_epoch: i,
+                    }
+                    .write_into(&mut data);
+
+                    expected_texture[x as usize][y as usize] = color_index;
+                }
+            }
+        }
+
+        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
 
         // Reset to clear
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -882,32 +1099,8 @@ mod tests {
 
         queue.submit(Some(encoder.finish()));
 
-        for i in 0..100 {
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-            let mut data: Vec<u8> = Vec::new();
-            for _ in 0..texture_size {
-                let x = generator.gen_range(0..texture_size);
-                let y = generator.gen_range(0..texture_size);
-
-                for _ in 0..5 {
-                    let color_index = generator.gen_range(0..color_id_to_tuple.len()) as u8;
-                    StoredTilePlacement {
-                        x: x as u16,
-                        y: y as u16,
-                        color_index: color_index,
-                        ms_since_epoch: i,
-                    }
-                    .write_into(&mut data);
-
-                    expected_texture[x as usize][y as usize] = color_index;
-                }
-            }
-
-            controller.update(&device, &mut encoder, data);
-            queue.submit(Some(encoder.finish()));
-        }
+        // Render tile updates
+        controller.update(&device, &queue, 1_000_000_000);
 
         let buffer = TestHelpers::texture_to_buffer(
             &device,
@@ -935,6 +1128,181 @@ mod tests {
                             .unwrap()
                     )
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn up_to_ms() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for i in 0..texture_size {
+            for _ in 0..4 {
+                let tile = StoredTilePlacement {
+                    x: i as u16,
+                    y: i as u16,
+                    color_index: 0,
+                    ms_since_epoch: i as u32,
+                };
+
+                tile.write_into(&mut data);
+            }
+        }
+
+        let (device, queue) = TestHelpers::get_device();
+        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
+
+        let result = controller.update(&device, &queue, 20);
+        assert!(matches!(
+            result,
+            PartialUpdateResult::UpdatedUpToMs {
+                max_ms_since_epoch_used: 20,
+                did_update_up_to_requested_ms: true
+            }
+        ));
+
+        let buffer = TestHelpers::texture_to_buffer(
+            &device,
+            &queue,
+            &controller.texture,
+            controller.texture_extent,
+        );
+        TestHelpers::save_debug_image("up_to_ms_0", &buffer);
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x <= 20 && y <= 20 && x == y {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        let result = controller.update(&device, &queue, 32);
+        assert!(matches!(
+            result,
+            PartialUpdateResult::UpdatedUpToMs {
+                max_ms_since_epoch_used: 32,
+                did_update_up_to_requested_ms: true
+            }
+        ));
+
+        let buffer = TestHelpers::texture_to_buffer(
+            &device,
+            &queue,
+            &controller.texture,
+            controller.texture_extent,
+        );
+        TestHelpers::save_debug_image("up_to_ms_1", &buffer);
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x <= 32 && y <= 32 && x == y {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        let result = controller.update(&device, &queue, texture_size);
+        assert!(matches!(result, PartialUpdateResult::ReachedEndOfInput));
+
+        let buffer = TestHelpers::texture_to_buffer(
+            &device,
+            &queue,
+            &controller.texture,
+            controller.texture_extent,
+        );
+        TestHelpers::save_debug_image("up_to_ms_2", &buffer);
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x == y {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn up_to_ms_with_holes() {
+        let mut color_id_to_tuple = BTreeMap::new();
+        color_id_to_tuple.insert(0, [0, 0, 0, 255]);
+
+        let texture_size: u32 = 64;
+
+        let meta = Meta {
+            chunk_descs: vec![],
+            color_id_to_tuple,
+            last_pixel_placed_at_seconds_since_epoch: 0,
+            canvas_size_changes: vec![CanvasSizeChange {
+                width: texture_size as u16,
+                height: texture_size as u16,
+                ms_since_epoch: 0,
+            }],
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+
+        for i in 0..texture_size {
+            if i % 2 == 0 {
+                continue;
+            }
+
+            let tile = StoredTilePlacement {
+                x: i as u16,
+                y: i as u16,
+                color_index: 0,
+                ms_since_epoch: i as u32,
+            };
+
+            tile.write_into(&mut data);
+        }
+
+        let (device, queue) = TestHelpers::get_device();
+        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
+
+        let result = controller.update(&device, &queue, 20);
+        // There's no tile placement at 20ms (20 % 2 == 0) so it should have updated up to 19ms
+        assert!(matches!(
+            result,
+            PartialUpdateResult::UpdatedUpToMs {
+                max_ms_since_epoch_used: 19,
+                did_update_up_to_requested_ms: true
+            }
+        ));
+
+        let buffer = TestHelpers::texture_to_buffer(
+            &device,
+            &queue,
+            &controller.texture,
+            controller.texture_extent,
+        );
+        TestHelpers::save_debug_image("up_to_ms_with_holes", &buffer);
+        for x in 0..texture_size {
+            for y in 0..texture_size {
+                if x <= 20 && y <= 20 && x == y && x % 2 == 1 {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 255]));
+                } else {
+                    assert_eq!(buffer.get_pixel(x, y), &Rgba([0, 0, 0, 0]));
+                }
             }
         }
     }

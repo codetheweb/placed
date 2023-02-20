@@ -1,4 +1,4 @@
-use std::mem::take;
+use std::io::{Read, Seek};
 
 use crate::{
     renderers::{ScalingRenderer, SurfaceSize},
@@ -9,7 +9,7 @@ use ultraviolet::{Mat4, Vec3};
 use wgpu::{Adapter, Device, Instance, Queue, Surface};
 use winit::window::Window;
 
-pub struct PixelArtDisplayState {
+pub struct PixelArtDisplayState<R> {
     surface: Surface,
     adapter: Adapter,
     device: Device,
@@ -17,8 +17,8 @@ pub struct PixelArtDisplayState {
 
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
     scaling_renderer: ScalingRenderer,
-    compute_renderer: TextureUpdateByCoords,
-    pending_tile_updates: Vec<u8>,
+    compute_renderer: TextureUpdateByCoords<R>,
+    up_to_ms: u32,
 
     current_scale_factor: f32,
     current_x_offset: f32,
@@ -26,12 +26,12 @@ pub struct PixelArtDisplayState {
     current_size: (u32, u32),
 }
 
-impl PixelArtDisplayState {
-    pub fn new(window: &Window, meta: Meta) -> Self {
-        pollster::block_on(Self::async_new(window, meta))
+impl<R: Read + Seek> PixelArtDisplayState<R> {
+    pub fn new(window: &Window, meta: Meta, reader: R) -> Self {
+        pollster::block_on(Self::async_new(window, meta, reader))
     }
 
-    async fn async_new(window: &Window, meta: Meta) -> Self {
+    async fn async_new(window: &Window, meta: Meta, reader: R) -> Self {
         let instance = Instance::new(wgpu::InstanceDescriptor::default());
 
         let surface = unsafe { instance.create_surface(&window).unwrap() };
@@ -79,7 +79,7 @@ impl PixelArtDisplayState {
             .first()
             .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
 
-        let compute_renderer = TextureUpdateByCoords::new(&device, meta);
+        let compute_renderer = TextureUpdateByCoords::new(&device, meta, reader);
 
         let scaling_renderer = ScalingRenderer::new(
             &device,
@@ -101,7 +101,7 @@ impl PixelArtDisplayState {
             queue,
             scaling_renderer,
             compute_renderer,
-            pending_tile_updates: Vec::new(),
+            up_to_ms: 0,
             current_scale_factor: 1.0,
             current_x_offset: 0.0,
             current_y_offset: 0.0,
@@ -109,27 +109,25 @@ impl PixelArtDisplayState {
         }
     }
 
-    pub fn update(&mut self, buf: Vec<u8>) {
-        self.pending_tile_updates = buf;
+    pub fn update(&mut self, up_to_ms: u32) {
+        self.up_to_ms = up_to_ms;
+
+        self.compute_renderer
+            .update(&self.device, &self.queue, self.up_to_ms);
     }
 
     pub fn render(&mut self) {
         let frame = self.surface.get_current_texture().unwrap();
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("render_encoder"),
             });
-
-        let buf = take(&mut self.pending_tile_updates);
-
-        self.compute_renderer
-            .update(&self.device, &mut encoder, buf);
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.scaling_renderer.render(&mut encoder, &view);
         self.queue.submit(Some(encoder.finish()));
