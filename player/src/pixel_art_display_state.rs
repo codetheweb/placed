@@ -107,7 +107,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             compute_renderer,
             last_up_to_ms: 0,
             up_to_ms: 0,
-            current_scale_factor: 1.0,
+            current_scale_factor: 0.5,
             current_x_offset: 0.0,
             current_y_offset: 0.0,
             current_size: (2000, 2000),
