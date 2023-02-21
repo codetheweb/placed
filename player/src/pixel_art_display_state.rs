@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     renderers::{ScalingRenderer, SurfaceSize},
-    texture_update_by_coords::TextureUpdateByCoords,
+    texture_update_by_coords::{PartialUpdateResult, TextureUpdateByCoords},
 };
 use archive::structures::Meta;
 use ultraviolet::{Mat4, Vec3};
@@ -83,7 +83,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             .first()
             .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
 
-        let compute_renderer = TextureUpdateByCoords::new(&device, meta, reader);
+        let compute_renderer = TextureUpdateByCoords::new(&device, meta, reader, None);
 
         let scaling_renderer = ScalingRenderer::new(
             &device,
@@ -120,8 +120,19 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
 
         let diff = Duration::from_millis((self.up_to_ms - self.last_up_to_ms).into());
 
-        self.compute_renderer
-            .update(&self.device, &self.queue, self.up_to_ms, diff);
+        match self
+            .compute_renderer
+            .update(&self.device, &self.queue, self.up_to_ms, diff)
+        {
+            PartialUpdateResult::ReachedEndOfInput => {
+                // temp
+                panic!("Reached end of input");
+            }
+            PartialUpdateResult::UpdatedUpToMs {
+                max_ms_since_epoch_used,
+                did_update_up_to_requested_ms,
+            } => {}
+        }
     }
 
     pub fn render(&mut self) {

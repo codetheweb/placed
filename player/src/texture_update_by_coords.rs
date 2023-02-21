@@ -88,7 +88,12 @@ const NUM_OF_TILES_PER_WORKGROUP: u32 = 4;
 // todo: add note about assuming sorted input
 
 impl<R: Read + Seek> TextureUpdateByCoords<R> {
-    pub fn new(device: &wgpu::Device, meta: Meta, reader: R) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        meta: Meta,
+        reader: R,
+        texture_usages: Option<wgpu::TextureUsages>,
+    ) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/texture_update_by_coords.compute.wgsl");
         let module = device.create_shader_module(shader);
 
@@ -174,8 +179,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
-                // todo: temp
-                | wgpu::TextureUsages::COPY_SRC,
+                | texture_usages.unwrap_or(wgpu::TextureUsages::empty()),
             label: None,
         };
         let texture = device.create_texture(&texture_desc);
@@ -287,7 +291,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         duration: Duration,
     ) -> PartialUpdateResult {
         loop {
-            match self.partial_update(device, queue, up_to_ms, duration) {
+            match pollster::block_on(self.partial_update(device, queue, up_to_ms, duration)) {
                 PartialUpdateResult::ReachedEndOfInput => {
                     return PartialUpdateResult::ReachedEndOfInput;
                 }
@@ -306,7 +310,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         }
     }
 
-    fn partial_update(
+    async fn partial_update(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -386,7 +390,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         queue.submit(Some(encoder.finish()));
         self.staging_belt.recall();
 
-        let bounds = self.read_computed_bounds(&device);
+        let bounds = self.read_computed_bounds(&device).await;
 
         if bounds.max_index_in_chunk_used != (num_of_tiles as u32 - 1) {
             self.reader
@@ -461,14 +465,15 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
         }
     }
 
-    fn read_computed_bounds(&self, device: &wgpu::Device) -> ComputedBounds {
+    async fn read_computed_bounds(&self, device: &wgpu::Device) -> ComputedBounds {
         let buffer_slice = self.staging_buffer.slice(..);
-        let (tx, rx) = mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+
         device.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().unwrap();
+
+        receiver.receive().await.unwrap().unwrap();
+
         let data = buffer_slice.get_mapped_range();
         let cast_data = bytemuck::cast_slice::<u8, u32>(&data).to_vec();
 
@@ -527,8 +532,12 @@ mod tests {
         ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
             let (device, queue) = Self::get_device();
 
-            let mut controller =
-                TextureUpdateByCoords::new(&device, meta.clone(), Cursor::new(data));
+            let mut controller = TextureUpdateByCoords::new(
+                &device,
+                meta.clone(),
+                Cursor::new(data),
+                Some(wgpu::TextureUsages::COPY_SRC),
+            );
             controller.update(&device, &queue, up_to_ms, Duration::from_secs(100));
 
             let buffer = Self::texture_to_buffer(
@@ -1139,7 +1148,12 @@ mod tests {
         };
 
         let (device, queue) = TestHelpers::get_device();
-        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
+        let mut controller = TextureUpdateByCoords::new(
+            &device,
+            meta,
+            Cursor::new(data),
+            Some(wgpu::TextureUsages::COPY_SRC),
+        );
 
         // Reset to clear
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1231,7 +1245,12 @@ mod tests {
         };
 
         let (device, queue) = TestHelpers::get_device();
-        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
+        let mut controller = TextureUpdateByCoords::new(
+            &device,
+            meta,
+            Cursor::new(data),
+            Some(wgpu::TextureUsages::COPY_SRC),
+        );
 
         let result = controller.update(&device, &queue, 20, Duration::from_secs(1_000));
         assert!(matches!(
@@ -1343,7 +1362,12 @@ mod tests {
         };
 
         let (device, queue) = TestHelpers::get_device();
-        let mut controller = TextureUpdateByCoords::new(&device, meta, Cursor::new(data));
+        let mut controller = TextureUpdateByCoords::new(
+            &device,
+            meta,
+            Cursor::new(data),
+            Some(wgpu::TextureUsages::COPY_SRC),
+        );
 
         let result = controller.update(&device, &queue, 20, Duration::MAX);
         // There's no tile placement at 20ms (20 % 2 == 0) so it should have updated up to 19ms

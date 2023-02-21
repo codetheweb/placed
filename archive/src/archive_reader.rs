@@ -50,9 +50,8 @@ impl<'a, R: Read + Seek + 'a> PlacedArchiveReader<'a, R> {
             Err(err) => return Err(NextTileChunkError::CouldNotFetchChunkFile(err)),
         };
 
-        let mut buf = Vec::new();
-        current_tile_chunk_file.data.read_to_end(&mut buf).unwrap();
-
+        let mut buf = Vec::with_capacity(current_tile_chunk_file.size as usize);
+        std::io::copy(&mut current_tile_chunk_file.data, &mut buf).unwrap();
         self.current_tile_chunk_data = Some(Cursor::new(buf));
 
         Ok(())
