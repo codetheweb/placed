@@ -1,15 +1,18 @@
-use std::{collections::HashMap, mem::take};
+use std::{
+    io::{Read, Seek},
+    time::Duration,
+};
 
 use crate::{
     renderers::{ScalingRenderer, SurfaceSize},
-    texture_update_by_coords::TextureUpdateByCoords,
+    texture_update_by_coords::{PartialUpdateResult, TextureUpdateByCoords},
 };
-use archive::structures::DecodedTilePlacement;
+use archive::structures::Meta;
 use ultraviolet::{Mat4, Vec3};
 use wgpu::{Adapter, Device, Instance, Queue, Surface};
 use winit::window::Window;
 
-pub struct PixelArtDisplayState {
+pub struct PixelArtDisplayState<R> {
     surface: Surface,
     adapter: Adapter,
     device: Device,
@@ -17,8 +20,9 @@ pub struct PixelArtDisplayState {
 
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
     scaling_renderer: ScalingRenderer,
-    compute_renderer: TextureUpdateByCoords,
-    pending_tile_updates: HashMap<(u16, u16), DecodedTilePlacement>,
+    compute_renderer: TextureUpdateByCoords<R>,
+    last_up_to_ms: u32,
+    up_to_ms: u32,
 
     current_scale_factor: f32,
     current_x_offset: f32,
@@ -26,15 +30,15 @@ pub struct PixelArtDisplayState {
     current_size: (u32, u32),
 }
 
-impl PixelArtDisplayState {
-    pub fn new(window: &Window) -> Self {
-        pollster::block_on(Self::async_new(window))
+impl<R: Read + Seek> PixelArtDisplayState<R> {
+    pub fn new(window: &Window, meta: Meta, reader: R) -> Self {
+        pollster::block_on(Self::async_new(window, meta, reader))
     }
 
-    async fn async_new(window: &Window) -> Self {
-        let instance = Instance::new(wgpu::Backends::all());
+    async fn async_new(window: &Window, meta: Meta, reader: R) -> Self {
+        let instance = Instance::new(wgpu::InstanceDescriptor::default());
 
-        let surface = unsafe { instance.create_surface(&window) };
+        let surface = unsafe { instance.create_surface(&window).unwrap() };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -58,7 +62,8 @@ impl PixelArtDisplayState {
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface.get_supported_formats(&adapter)[0],
+            view_formats: [surface.get_capabilities(&adapter).formats[0]].to_vec(),
+            format: surface.get_capabilities(&adapter).formats[0],
             width: 2000,
             height: 2000,
             present_mode: wgpu::PresentMode::Fifo,
@@ -73,11 +78,12 @@ impl PixelArtDisplayState {
         };
 
         let surface_texture_format = *surface
-            .get_supported_formats(&adapter)
+            .get_capabilities(&adapter)
+            .formats
             .first()
             .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
 
-        let compute_renderer = TextureUpdateByCoords::new(&device);
+        let compute_renderer = TextureUpdateByCoords::new(&device, meta, reader, None);
 
         let scaling_renderer = ScalingRenderer::new(
             &device,
@@ -99,35 +105,48 @@ impl PixelArtDisplayState {
             queue,
             scaling_renderer,
             compute_renderer,
-            pending_tile_updates: HashMap::new(),
-            current_scale_factor: 1.0,
+            last_up_to_ms: 0,
+            up_to_ms: 0,
+            current_scale_factor: 0.5,
             current_x_offset: 0.0,
             current_y_offset: 0.0,
             current_size: (2000, 2000),
         }
     }
 
-    pub fn update_pixel(&mut self, tile: DecodedTilePlacement) {
-        self.pending_tile_updates.insert((tile.x, tile.y), tile);
+    pub fn update(&mut self, up_to_ms: u32) {
+        self.last_up_to_ms = self.up_to_ms;
+        self.up_to_ms = up_to_ms;
+
+        let diff = Duration::from_millis((self.up_to_ms - self.last_up_to_ms).into());
+
+        match self
+            .compute_renderer
+            .update(&self.device, &self.queue, self.up_to_ms, diff)
+        {
+            PartialUpdateResult::ReachedEndOfInput => {
+                // temp
+                panic!("Reached end of input");
+            }
+            PartialUpdateResult::UpdatedUpToMs {
+                max_ms_since_epoch_used,
+                did_update_up_to_requested_ms,
+            } => {}
+        }
     }
 
     pub fn render(&mut self) {
         let frame = self.surface.get_current_texture().unwrap();
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("render_encoder"),
             });
-
-        let tiles = take(&mut self.pending_tile_updates).into_values().collect();
-
-        self.compute_renderer
-            .update(&self.device, &mut encoder, tiles);
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.scaling_renderer.render(&mut encoder, &view);
         self.queue.submit(Some(encoder.finish()));
@@ -174,7 +193,8 @@ impl PixelArtDisplayState {
             &self.device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.surface.get_supported_formats(&self.adapter)[0],
+                view_formats: [self.surface.get_capabilities(&self.adapter).formats[0]].to_vec(),
+                format: self.surface.get_capabilities(&self.adapter).formats[0],
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,

@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 use colors_transform::Color;
 use std::fs::File;
 
+// todo: use https://github.com/emersonford/tracing-indicatif for automatic progress bars?
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
@@ -54,9 +56,12 @@ fn main() {
                 let color_str = record.get(2).unwrap().to_string();
                 let parsed_color = colors_transform::Rgb::from_hex_str(&color_str).unwrap();
 
-                // todo: panic if coords contain more than 1 ,
-
                 let clean_coords = record.get(3).unwrap().replace('"', "");
+                // todo: handle moderator edits
+                if clean_coords.matches(',').count() != 1 {
+                    println!("Invalid coordinates: {}", clean_coords);
+                    continue;
+                }
                 let mut coords = clean_coords.split(',');
                 let x_str = coords.next().unwrap();
                 let y_str = coords.next().unwrap();
@@ -76,7 +81,7 @@ fn main() {
                 );
             }
 
-            archive_writer.finalize();
+            archive_writer.finalize(true);
         }
         Commands::Render {
             archive_path,

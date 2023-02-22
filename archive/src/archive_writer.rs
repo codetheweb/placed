@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     io::{Read, Seek, SeekFrom, Write},
 };
 
@@ -39,7 +39,7 @@ impl Ord for IntermediateTilePlacement {
 
 pub struct PlacedArchiveWriter<'a, W: Write> {
     mla: ArchiveWriter<'a, W>,
-    color_tuple_to_id: HashMap<[u8; 4], u8>,
+    color_tuple_to_id: BTreeMap<[u8; 4], u8>,
     tile_placements: Vec<IntermediateTilePlacement>,
 }
 
@@ -47,12 +47,12 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
     pub fn new(dest: W) -> Self {
         let mut config = ArchiveWriterConfig::new();
         config.disable_layer(mla::Layers::ENCRYPT);
-        config.enable_layer(mla::Layers::COMPRESS);
+        // todo: enable compression?
         let mla = ArchiveWriter::from_config(dest, config).unwrap();
 
         PlacedArchiveWriter {
             mla,
-            color_tuple_to_id: HashMap::new(),
+            color_tuple_to_id: BTreeMap::new(),
             tile_placements: Vec::new(),
         }
     }
@@ -72,7 +72,7 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
         });
     }
 
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self, should_generate_snapshots: bool) {
         self.tile_placements.sort();
 
         let first_tile_placed_at = self.tile_placements.first().unwrap().placed_at;
@@ -134,9 +134,15 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
         let meta = Meta {
             canvas_size_changes,
             chunk_descs,
-            // todo
-            last_pixel_placed_at_seconds_since_epoch: 0,
-            color_id_to_tuple: HashMap::from_iter(
+            last_tile_placed_at_ms_since_epoch: self
+                .tile_placements
+                .last()
+                .unwrap()
+                .placed_at
+                .signed_duration_since(first_tile_placed_at)
+                .num_milliseconds() as u32,
+            total_tile_placements: self.tile_placements.len() as u64,
+            color_id_to_tuple: BTreeMap::from_iter(
                 self.color_tuple_to_id.iter().map(|(k, v)| (*v, *k)),
             ),
         };
@@ -148,47 +154,50 @@ impl<'a, W: Write> PlacedArchiveWriter<'a, W> {
             .unwrap();
 
         // Generate snapshots
-        let largest_canvas_size = meta.get_largest_canvas_size().unwrap();
-        let mut canvas = RgbImage::new(
-            largest_canvas_size.width as u32,
-            largest_canvas_size.height as u32,
-        );
+        if should_generate_snapshots {
+            let largest_canvas_size = meta.get_largest_canvas_size().unwrap();
+            let mut canvas = RgbImage::new(
+                largest_canvas_size.width as u32,
+                largest_canvas_size.height as u32,
+            );
+            canvas.fill(0xff);
 
-        let mut num_of_processed_tiles = 0;
-        for chunk in meta.chunk_descs {
-            for tile in self.tile_placements[num_of_processed_tiles..]
-                .iter()
-                .take(chunk.num_tiles as usize)
-            {
-                canvas.put_pixel(
-                    tile.x as u32,
-                    tile.y as u32,
-                    image::Rgb(
-                        meta.color_id_to_tuple[&tile.color_index][0..3]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                );
+            let mut num_of_processed_tiles = 0;
+            for chunk in meta.chunk_descs {
+                for tile in self.tile_placements[num_of_processed_tiles..]
+                    .iter()
+                    .take(chunk.num_tiles as usize)
+                {
+                    canvas.put_pixel(
+                        tile.x as u32,
+                        tile.y as u32,
+                        image::Rgb(
+                            meta.color_id_to_tuple[&tile.color_index][0..3]
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    );
+                }
+
+                num_of_processed_tiles += chunk.num_tiles as usize;
+
+                let mut temp_snapshot = tempfile().unwrap();
+                let mut buf = Vec::new();
+                // needs a seekable writer
+                canvas
+                    .write_to(&mut temp_snapshot, image::ImageOutputFormat::Png)
+                    .unwrap();
+                temp_snapshot.seek(SeekFrom::Start(0)).unwrap();
+                temp_snapshot.read_to_end(&mut buf).unwrap();
+
+                self.mla
+                    .add_file(
+                        format!("snapshots/{}", chunk.id).as_str(),
+                        buf.len() as u64,
+                        buf.as_slice(),
+                    )
+                    .unwrap();
             }
-
-            num_of_processed_tiles += chunk.num_tiles as usize;
-
-            let mut temp_snapshot = tempfile().unwrap();
-            let mut buf = Vec::new();
-            // needs a seekable writer
-            canvas
-                .write_to(&mut temp_snapshot, image::ImageOutputFormat::Png)
-                .unwrap();
-            temp_snapshot.seek(SeekFrom::Start(0)).unwrap();
-            temp_snapshot.read_to_end(&mut buf).unwrap();
-
-            self.mla
-                .add_file(
-                    format!("snapshots/{}", chunk.id).as_str(),
-                    buf.len() as u64,
-                    buf.as_slice(),
-                )
-                .unwrap();
         }
 
         self.mla.finalize().unwrap();

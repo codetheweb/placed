@@ -1,6 +1,10 @@
-use std::{fs::File, iter::Peekable, time::Duration};
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Read, Seek},
+    time::Duration,
+};
 
-use archive::PlacedArchiveReader;
+use archive::{structures::StoredTilePlacement, PlacedArchiveReader};
 use game_loop::{game_loop, Time, TimeTrait};
 use winit::{
     dpi::{LogicalSize, PhysicalSize},
@@ -14,37 +18,29 @@ mod pixel_art_display_state;
 mod renderers;
 mod texture_update_by_coords;
 
-struct Player<'a> {
+struct Player<R> {
     rendered_up_to: Duration,
-    r: Peekable<PlacedArchiveReader<'a, File>>,
-    render_state: pixel_art_display_state::PixelArtDisplayState,
+    render_state: pixel_art_display_state::PixelArtDisplayState<R>,
     timescale_factor: f32,
 }
 
-impl<'a> Player<'a> {
+impl<R: Read + Seek> Player<R> {
     pub fn new(
-        r: PlacedArchiveReader<'a, File>,
-        render_state: pixel_art_display_state::PixelArtDisplayState,
+        render_state: pixel_art_display_state::PixelArtDisplayState<R>,
         timescale_factor: f32,
     ) -> Self {
         Self {
             rendered_up_to: Duration::ZERO,
-            r: r.peekable(),
             render_state,
             timescale_factor,
         }
     }
 
     pub fn update(&mut self, dt: Duration) {
-        self.rendered_up_to = self.rendered_up_to + dt.mul_f32(self.timescale_factor);
+        self.rendered_up_to += dt * self.timescale_factor as u32;
 
-        while let Some(next_tile) = self.r.peek() {
-            if next_tile.ms_since_epoch > self.rendered_up_to.as_millis() as u32 {
-                break;
-            }
-
-            self.render_state.update_pixel(self.r.next().unwrap());
-        }
+        self.render_state
+            .update(self.rendered_up_to.as_millis() as u32);
     }
 
     pub fn draw(&mut self) {
@@ -70,6 +66,7 @@ impl<'a> Player<'a> {
     }
 }
 
+// todo: add option to unlock fps?
 pub const FPS: usize = 60;
 pub const TIME_STEP: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
 
@@ -94,26 +91,27 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
     let file = File::open(archive_path).expect("Failed to open archive");
     let reader = PlacedArchiveReader::new(file).expect("Failed to create reader");
 
-    let mut state = pixel_art_display_state::PixelArtDisplayState::new(&window);
+    let mut state =
+        pixel_art_display_state::PixelArtDisplayState::new(&window, reader.meta.clone(), reader);
     state.clear(wgpu::Color::WHITE);
-    let p = Player::new(reader, state, timescale_factor);
+    let p = Player::new(state, timescale_factor);
 
     game_loop(
         event_loop,
         window,
         p,
         FPS as u32,
-        0.1,
+        2.0,
         move |g| {
             g.game.update(TIME_STEP);
         },
         move |g| {
             g.game.draw();
 
-            let dt = TIME_STEP.as_secs_f64() - Time::now().sub(&g.current_instant());
-            if dt > 0.0 {
-                std::thread::sleep(Duration::from_secs_f64(dt));
-            }
+            // let dt = TIME_STEP.as_secs_f64() - Time::now().sub(&g.current_instant());
+            // if dt > 0.0 {
+            //     std::thread::sleep(Duration::from_secs_f64(dt));
+            // }
         },
         move |g, event| {
             if input.update(event) {
