@@ -126,6 +126,9 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
                     WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                         g.game.resize(**new_inner_size);
                     }
+                    WindowEvent::CloseRequested => {
+                        std::process::exit(0);
+                    }
                     _ => (),
                 },
                 _ => {}
