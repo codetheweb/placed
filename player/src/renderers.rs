@@ -51,12 +51,14 @@ impl ScalingRenderer {
         });
 
         // Create vertex buffer; array-of-array of position and texture coordinates
-        let vertex_data: [[f32; 2]; 3] = [
-            // One full-screen triangle
-            // See: https://github.com/parasyte/pixels/issues/180
-            [-1.0, -1.0],
-            [3.0, -1.0],
-            [-1.0, 3.0],
+        let vertex_data: [[f32; 2]; 6] = [
+            // Quad
+            [-0.5, -0.5],
+            [0.5, -0.5],
+            [0.5, 0.5],
+            [-0.5, -0.5],
+            [-0.5, 0.5],
+            [0.5, 0.5],
         ];
         let vertex_data_slice = bytemuck::cast_slice(&vertex_data);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -199,7 +201,7 @@ impl ScalingRenderer {
         rpass.set_bind_group(0, &self.bind_group, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         // todo: add back scissor region for better performance?
-        rpass.draw(0..3, 0..1);
+        rpass.draw(0..6, 0..1);
     }
 
     pub fn update_transform_matrix(&mut self, queue: &wgpu::Queue, matrix: Mat4) {
