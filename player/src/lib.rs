@@ -53,6 +53,7 @@ impl<R: Read + Seek> Player<R> {
     }
 
     pub fn draw(&mut self) {
+        self.transform_generator.update();
         self.render_state
             .render(self.transform_generator.get_transform_matrix());
     }
@@ -62,6 +63,14 @@ impl<R: Read + Seek> Player<R> {
 
         if scrolled != 0.0 {
             self.transform_generator.apply_scale_diff(scrolled);
+        }
+
+        if input.mouse_pressed(0) {
+            self.transform_generator.on_pan_start();
+        }
+
+        if input.mouse_released(0) {
+            self.transform_generator.on_pan_end();
         }
 
         if input.mouse_held(0) {
