@@ -16,17 +16,12 @@ pub struct ScalingRenderer {
     bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
     pub(crate) clear_color: wgpu::Color,
-    width: f32,
-    height: f32,
-    clip_rect: (u32, u32, u32, u32),
 }
 
 impl ScalingRenderer {
     pub(crate) fn new(
         device: &wgpu::Device,
         texture_view: &wgpu::TextureView,
-        texture_size: &wgpu::Extent3d,
-        surface_size: &SurfaceSize,
         render_texture_format: wgpu::TextureFormat,
         clear_color: wgpu::Color,
         blend_state: wgpu::BlendState,
@@ -53,12 +48,18 @@ impl ScalingRenderer {
         // Create vertex buffer; array-of-array of position and texture coordinates
         let vertex_data: [[f32; 2]; 6] = [
             // Quad
-            [-0.5, -0.5],
-            [0.5, -0.5],
-            [0.5, 0.5],
-            [-0.5, -0.5],
-            [-0.5, 0.5],
-            [0.5, 0.5],
+            // [-0.5, -0.5],
+            // [0.5, -0.5],
+            // [0.5, 0.5],
+            // [-0.5, -0.5],
+            // [-0.5, 0.5],
+            // [0.5, 0.5],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
         ];
         let vertex_data_slice = bytemuck::cast_slice(&vertex_data);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -77,11 +78,8 @@ impl ScalingRenderer {
         };
 
         // Create uniform buffer
-        let matrix = ScalingMatrix::new(
-            (texture_size.width as f32, texture_size.height as f32),
-            (surface_size.width as f32, surface_size.height as f32),
-        );
-        let transform_bytes = matrix.as_bytes();
+        let matrix = Mat4::identity();
+        let transform_bytes = matrix.as_byte_slice();
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("pixels_scaling_renderer_matrix_uniform_buffer"),
             contents: transform_bytes,
@@ -168,18 +166,12 @@ impl ScalingRenderer {
             multiview: None,
         });
 
-        // Create clipping rectangle
-        let clip_rect = matrix.clip_rect();
-
         Self {
             vertex_buffer,
             uniform_buffer,
             bind_group,
             render_pipeline,
             clear_color,
-            width: texture_size.width as f32,
-            height: texture_size.height as f32,
-            clip_rect,
         }
     }
 
@@ -206,64 +198,5 @@ impl ScalingRenderer {
 
     pub fn update_transform_matrix(&mut self, queue: &wgpu::Queue, matrix: Mat4) {
         queue.write_buffer(&self.uniform_buffer, 0, matrix.as_byte_slice());
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ScalingMatrix {
-    pub(crate) transform: Mat4,
-    clip_rect: (u32, u32, u32, u32),
-}
-
-impl ScalingMatrix {
-    // texture_size is the dimensions of the drawing texture
-    // screen_size is the dimensions of the surface being drawn to
-    pub(crate) fn new(texture_size: (f32, f32), screen_size: (f32, f32)) -> Self {
-        let (texture_width, texture_height) = texture_size;
-        let (screen_width, screen_height) = screen_size;
-
-        // Get smallest scale size
-        let scale = (screen_width / texture_width)
-            .clamp(1.0, screen_height / texture_height)
-            .floor();
-
-        let scaled_width = texture_width * scale;
-        let scaled_height = texture_height * scale;
-
-        // Create a transformation matrix
-        let sw = scaled_width / screen_width;
-        let sh = scaled_height / screen_height;
-        let tx = (screen_width / 2.0).fract() / screen_width;
-        let ty = (screen_height / 2.0).fract() / screen_height;
-        #[rustfmt::skip]
-        let transform: [f32; 16] = [
-            sw,  0.0, 0.0, 0.0,
-            0.0, sh,  0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            tx,  ty,  0.0, 1.0,
-        ];
-
-        // Create a clipping rectangle
-        let clip_rect = {
-            let scaled_width = scaled_width.min(screen_width);
-            let scaled_height = scaled_height.min(screen_height);
-            let x = ((screen_width - scaled_width) / 2.0) as u32;
-            let y = ((screen_height - scaled_height) / 2.0) as u32;
-
-            (x, y, scaled_width as u32, scaled_height as u32)
-        };
-
-        Self {
-            transform: Mat4::from(transform),
-            clip_rect,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.transform.as_byte_slice()
-    }
-
-    pub(crate) fn clip_rect(&self) -> (u32, u32, u32, u32) {
-        self.clip_rect
     }
 }

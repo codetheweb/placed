@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    renderers::{ScalingRenderer, SurfaceSize},
+    renderers::ScalingRenderer,
     texture_update_by_coords::{PartialUpdateResult, TextureUpdateByCoords},
 };
 use archive::structures::Meta;
@@ -89,11 +89,6 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
         let scaling_renderer = ScalingRenderer::new(
             &device,
             &compute_renderer.texture_view,
-            &texture_extent,
-            &SurfaceSize {
-                width: canvas_size.width.into(),
-                height: canvas_size.height.into(),
-            },
             surface_texture_format,
             wgpu::Color::BLACK,
             wgpu::BlendState::REPLACE,

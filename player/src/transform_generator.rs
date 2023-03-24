@@ -7,7 +7,7 @@ pub struct TransformGenerator {
     previous_offset: Vec2,
     pan_velocity: Vec2,
     offset: Vec2,
-    scale: f32,
+    scale_transform: Mat4,
     texture_size: wgpu::Extent3d,
 }
 
@@ -20,7 +20,7 @@ impl TransformGenerator {
             previous_offset: Vec2::zero(),
             pan_velocity: Vec2::zero(),
             offset: Vec2::zero(),
-            scale: 1.0,
+            scale_transform: Mat4::identity(),
             texture_size,
         }
     }
@@ -43,35 +43,48 @@ impl TransformGenerator {
             return;
         }
 
-        self.offset.x += x;
-        self.offset.y += y;
+        self.previous_offset = self.offset;
+
+        self.offset.x += (x / self.window_size.0 as f32) * 2.0;
+        self.offset.y += (y / self.window_size.1 as f32) * 2.0;
 
         self.pan_velocity = self.offset - self.previous_offset;
-        self.previous_offset = self.offset;
     }
 
-    pub fn apply_scale_diff(&mut self, diff: f32) {
-        let new_scale = (self.scale + diff).clamp(0.5, 20.0);
-        self.scale = new_scale;
+    pub fn apply_scale_diff(&mut self, diff: f32, origin: Option<(f32, f32)>) {
+        let origin = Vec2::from(origin.unwrap_or((0.0, 0.0)));
+
+        let scale_around = Vec2::new(
+            ((origin.x / self.window_size.0 as f32) - 0.5) * 2.0,
+            -((origin.y / self.window_size.1 as f32) - 0.5) * 2.0,
+        ) - self.offset;
+
+        let translate = Mat4::from_translation(Vec3::new(-scale_around.x, -scale_around.y, 0.0));
+        let translate_back = Mat4::from_translation(Vec3::new(scale_around.x, scale_around.y, 0.0));
+
+        let scale_amount = if diff > 0.0 {
+            1.0 + diff * 0.1
+        } else {
+            1.0 / (1.0 - diff * 0.1)
+        };
+
+        self.scale_transform =
+            translate_back * Mat4::from_scale(scale_amount) * translate * self.scale_transform;
     }
 
     pub fn get_transform_matrix(&self) -> Mat4 {
-        let world_to_screen = Mat4::from_nonuniform_scale(Vec3::new(
+        let base_scale = Mat4::from_scale(self.window_scale_factor);
+        let scale_ratio = Mat4::from_nonuniform_scale(Vec3::new(
             self.texture_size.width as f32 / self.window_size.0 as f32,
             self.texture_size.height as f32 / self.window_size.1 as f32,
             1.0,
         ));
 
-        let translate = Mat4::from_translation(Vec3::new(
-            self.offset.x / (self.texture_size.width as f32 / 2.0),
-            self.offset.y / (self.texture_size.height as f32 / 2.0),
-            0.0,
-        ));
+        let base_model_transform = Mat4::from_translation(Vec3::new(-0.5, -0.5, 0.0));
+        let translate = Mat4::from_translation(Vec3::new(self.offset.x, self.offset.y, 0.0));
 
-        let base_scale = Mat4::from_scale(self.window_scale_factor);
-        let scale = Mat4::from_scale(self.scale);
-
-        let transform = world_to_screen * translate * base_scale * scale;
+        let transform =
+            translate * self.scale_transform * scale_ratio * base_scale * base_model_transform;
 
         transform
     }
@@ -82,10 +95,10 @@ impl TransformGenerator {
 
     pub fn update(&mut self) {
         if !self.is_user_panning && self.pan_velocity != Vec2::zero() {
-            self.pan_velocity *= 0.9;
+            self.pan_velocity *= 0.93;
             self.offset = self.offset + self.pan_velocity;
 
-            if (self.pan_velocity.x.abs() + self.pan_velocity.y.abs()) < 0.1 {
+            if (self.pan_velocity.x.abs() + self.pan_velocity.y.abs()) < f32::EPSILON {
                 self.pan_velocity = Vec2::zero();
             }
         }

@@ -62,7 +62,8 @@ impl<R: Read + Seek> Player<R> {
         let scrolled = input.scroll_diff();
 
         if scrolled != 0.0 {
-            self.transform_generator.apply_scale_diff(scrolled);
+            self.transform_generator
+                .apply_scale_diff(scrolled, input.mouse());
         }
 
         if input.mouse_pressed(0) {
