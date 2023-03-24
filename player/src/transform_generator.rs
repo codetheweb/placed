@@ -68,8 +68,16 @@ impl TransformGenerator {
             1.0 / (1.0 - diff * 0.1)
         };
 
-        self.scale_transform =
+        let next_scale_transform =
             translate_back * Mat4::from_scale(scale_amount) * translate * self.scale_transform;
+
+        let scale_factor = next_scale_transform.cols[0].mag();
+
+        if scale_factor < 1.0 || scale_factor > 50.0 {
+            return;
+        }
+
+        self.scale_transform = next_scale_transform;
     }
 
     pub fn get_transform_matrix(&self) -> Mat4 {
