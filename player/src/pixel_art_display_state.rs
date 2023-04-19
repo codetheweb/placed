@@ -13,18 +13,20 @@ use wgpu::{Adapter, Device, Instance, Queue, Surface};
 use winit::window::Window;
 
 pub struct PixelArtDisplayState<R> {
-    surface: Surface,
+    pub surface_config: wgpu::SurfaceConfiguration,
+    pub surface: Surface,
     adapter: Adapter,
-    device: Device,
-    queue: Queue,
+    pub device: Device,
+    pub queue: Queue,
 
     /// A default renderer to scale the input texture to the screen size (stolen from the pixels crate)
-    scaling_renderer: ScalingRenderer,
+    pub scaling_renderer: ScalingRenderer,
     compute_renderer: TextureUpdateByCoords<R>,
     last_up_to_ms: u32,
     up_to_ms: u32,
 
     pub texture_size: wgpu::Extent3d,
+    pub texture_format: wgpu::TextureFormat,
 }
 
 impl<R: Read + Seek> PixelArtDisplayState<R> {
@@ -48,7 +50,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
+                    features: wgpu::Features::default() | wgpu::Features::TEXTURE_COMPRESSION_BC,
                     limits: wgpu::Limits::default(),
                     label: None,
                 },
@@ -95,6 +97,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
         );
 
         Self {
+            surface_config: config,
             surface,
             adapter,
             device,
@@ -104,6 +107,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             last_up_to_ms: 0,
             up_to_ms: 0,
             texture_size: texture_extent,
+            texture_format: surface_texture_format,
         }
     }
 
@@ -176,17 +180,9 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
     }
 
     pub fn on_window_resize(&mut self, new_width: u32, new_height: u32) {
-        self.surface.configure(
-            &self.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: [self.surface.get_capabilities(&self.adapter).formats[0]].to_vec(),
-                format: self.surface.get_capabilities(&self.adapter).formats[0],
-                width: new_width,
-                height: new_height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            },
-        );
+        self.surface_config.width = new_width;
+        self.surface_config.height = new_height;
+
+        self.surface.configure(&self.device, &self.surface_config);
     }
 }
