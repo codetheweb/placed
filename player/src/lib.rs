@@ -197,7 +197,7 @@ pub const TIME_STEP: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64)
 const WIDTH: u32 = 2000;
 const HEIGHT: u32 = 2000;
 
-pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
+pub fn play(archive_path: String) -> i32 {
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
 
@@ -222,6 +222,11 @@ pub fn play(archive_path: String, timescale_factor: f32) -> i32 {
 
     event_loop.run(move |event, _, control_flow| {
         p.platform.handle_event(&event);
+        if !p.platform.context().wants_pointer_input() {
+            if input.update(&event) {
+                p.handle_input(&input);
+            }
+        }
 
         match event {
             Event::RedrawRequested(..) => {
