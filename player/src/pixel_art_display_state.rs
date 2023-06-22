@@ -9,7 +9,7 @@ use crate::{
 };
 use archive::structures::Meta;
 use ultraviolet::Mat4;
-use wgpu::{Adapter, Device, Instance, Queue, Surface};
+use wgpu::{Adapter, Device, Instance, Queue, Surface, TextureFormat};
 use winit::window::Window;
 
 pub struct PixelArtDisplayState<R> {
@@ -59,10 +59,11 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             .await
             .unwrap();
 
+        let format = TextureFormat::Bgra8Unorm;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: [surface.get_capabilities(&adapter).formats[0]].to_vec(),
-            format: surface.get_capabilities(&adapter).formats[0],
+            view_formats: [format].to_vec(),
+            format,
             width: window.inner_size().width,
             height: window.inner_size().height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -80,18 +81,12 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             depth_or_array_layers: 1,
         };
 
-        let surface_texture_format = *surface
-            .get_capabilities(&adapter)
-            .formats
-            .first()
-            .unwrap_or(&wgpu::TextureFormat::Bgra8UnormSrgb);
-
         let compute_renderer = TextureUpdateByCoords::new(&device, meta, reader, None);
 
         let scaling_renderer = ScalingRenderer::new(
             &device,
             &compute_renderer.texture_view,
-            surface_texture_format,
+            format,
             wgpu::Color::BLACK,
             wgpu::BlendState::REPLACE,
         );
@@ -107,7 +102,7 @@ impl<R: Read + Seek> PixelArtDisplayState<R> {
             last_up_to_ms: 0,
             up_to_ms: 0,
             texture_size: texture_extent,
-            texture_format: surface_texture_format,
+            texture_format: format,
         }
     }
 
