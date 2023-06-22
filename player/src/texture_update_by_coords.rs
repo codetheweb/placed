@@ -188,7 +188,7 @@ impl<R: Read + Seek> TextureUpdateByCoords<R> {
             label: None,
             format: Some(wgpu::TextureFormat::Rgba8Unorm),
             base_mip_level: 0,
-            mip_level_count: NonZeroU32::new(1),
+            mip_level_count: Some(1),
             ..Default::default()
         });
 

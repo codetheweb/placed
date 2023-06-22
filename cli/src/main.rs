@@ -17,7 +17,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Repack data from a CSV into an archive containing color and tile data
-    Pack { in_file: String, out_file: String },
+    Pack {
+        in_file: String,
+        out_file: String,
+    },
     /// Render history to an image
     Render {
         archive_path: String,
@@ -28,8 +31,6 @@ enum Commands {
     },
     Play {
         archive_path: String,
-        #[clap(short, long, default_value = "1")]
-        timescale_factor: f32,
     },
 }
 
@@ -107,11 +108,8 @@ fn main() {
 
             canvas.save(out_file).expect("Could not save image");
         }
-        Commands::Play {
-            archive_path,
-            timescale_factor,
-        } => {
-            player::play(archive_path, timescale_factor);
+        Commands::Play { archive_path } => {
+            player::play(archive_path);
         }
     }
 }
